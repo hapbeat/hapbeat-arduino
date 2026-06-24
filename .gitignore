@@ -1,0 +1,20 @@
+# Build artifacts
+.pio/
+build/
+*.o
+*.bin
+*.elf
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Dev-only files live in the workspace (private), per repo policy:
+#   hapbeat-sdk-workspace/subrepo-devs/arduino/
+CLAUDE.md
+AGENTS.md
+instructions/
+.claude/
+dev-notes/

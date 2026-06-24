@@ -1,0 +1,20 @@
+#######################################
+# Syntax coloring for the Hapbeat library
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+Hapbeat	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+begin	KEYWORD2
+play	KEYWORD2
+stop	KEYWORD2
+stopAll	KEYWORD2
+ping	KEYWORD2
+playSine	KEYWORD2
+end	KEYWORD2
+setGroup	KEYWORD2

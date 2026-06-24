@@ -1,0 +1,22 @@
+{
+  "name": "Hapbeat",
+  "version": "0.1.0",
+  "description": "Drive Hapbeat haptic devices from ESP32 / M5Stack over Wi-Fi UDP. Fire kit events (command mode) or stream a synthesized sine wave (frequency + intensity). No stored audio needed.",
+  "keywords": "hapbeat, haptics, esp32, m5stack, udp, wifi, vibration",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hapbeat/hapbeat-arduino.git"
+  },
+  "authors": [
+    { "name": "Hapbeat", "email": "yus988@hapbeat.com", "maintainer": true }
+  ],
+  "license": "MIT",
+  "homepage": "https://devtools.hapbeat.com/",
+  "frameworks": "arduino",
+  "platforms": ["espressif32", "espressif8266"],
+  "headers": "Hapbeat.h",
+  "examples": [
+    { "name": "M5Stack_Command", "base": "examples/M5Stack_Command", "files": ["M5Stack_Command.ino"] },
+    { "name": "M5Stack_SineStream", "base": "examples/M5Stack_SineStream", "files": ["M5Stack_SineStream.ino"] }
+  ]
+}
