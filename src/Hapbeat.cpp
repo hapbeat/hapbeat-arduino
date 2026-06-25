@@ -16,27 +16,26 @@ bool Hapbeat::begin(uint16_t port, const char* appName) {
   return true;
 }
 
-void Hapbeat::sendPacket(const uint8_t* buf, size_t len) {
-  if (!_ready || len == 0) return;
+bool Hapbeat::sendPacket(const uint8_t* buf, size_t len) {
+  if (!_ready || len == 0) return false;
   _udp.beginPacket(IPAddress(255, 255, 255, 255), _port);
   _udp.write(buf, len);
-  _udp.endPacket();
+  return _udp.endPacket() != 0;
 }
 
-void Hapbeat::sendTo(const uint8_t* buf, size_t len, IPAddress ip) {
-  if (!_ready || len == 0) return;
+bool Hapbeat::sendTo(const uint8_t* buf, size_t len, IPAddress ip) {
+  if (!_ready || len == 0) return false;
   _udp.beginPacket(ip, _port);
   _udp.write(buf, len);
-  _udp.endPacket();
+  return _udp.endPacket() != 0;
 }
 
-void Hapbeat::streamSend(const uint8_t* buf, size_t len) {
+bool Hapbeat::streamSend(const uint8_t* buf, size_t len) {
   // Unicast to a discovered device (Wi-Fi MAC-ACK + retry = far fewer drops,
   // ~ESP-NOW reliability); fall back to broadcast if not discovered.
   if ((uint32_t)_deviceIp != 0)
-    sendTo(buf, len, _deviceIp);
-  else
-    sendPacket(buf, len);
+    return sendTo(buf, len, _deviceIp);
+  return sendPacket(buf, len);
 }
 
 bool Hapbeat::discover(uint32_t timeoutMs) {
@@ -94,55 +93,96 @@ void Hapbeat::end() {
   _ready = false;
 }
 
-void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs, const char* target) {
-  if (!_ready) return;
+// ~160 ms of audio kept buffered in the device's ~256 ms ring so Wi-Fi jitter
+// never starves playback. (Just-in-time pacing underran on any network hiccup,
+// which was heard as choppiness.) Chunks are sent as fast as possible until the
+// estimated ring depth reaches this target, then topped up as the device drains.
+static const uint16_t kSineChunk = 256;                 // samples/packet (16 ms @ 16 kHz)
+static const uint32_t kSineTargetLead = 16000 * 160 / 1000;  // ~2560 samples (~160 ms)
+// Max STREAM_DATA chunks emitted per pumpSine() call. Caps the start/catch-up
+// burst so a single synchronous beginPacket/endPacket storm cannot overrun the
+// ESP32 lwIP/Wi-Fi TX path (which silently drops). The caller (loop()/playSine)
+// tops up the remaining lead across subsequent calls.
+static const int kSineMaxChunksPerPump = 4;
+
+void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
+  if (!_ready || _sineActive) return;
   if (intensity < 0.0f) intensity = 0.0f;
   if (intensity > 1.0f) intensity = 1.0f;
 
-  const uint16_t rate = 16000;  // device clip-stream rate (16 kHz PCM16)
-  const uint16_t CHUNK = 256;   // samples per packet (16 ms @ 16 kHz)
-  const uint32_t totalSamples = (uint32_t)((uint64_t)rate * durationMs / 1000);
+  _sineRate = 16000;  // device clip-stream rate (16 kHz PCM16)
+  _sinePhase = 0.0f;
+  _sineDphase = 2.0f * (float)PI * freqHz / (float)_sineRate;
+  _sineAmp = (int16_t)(0.8f * 32767.0f);  // 0.8 headroom; loudness via gain
+  _sineSent = 0;
+  _sineByteOffset = 0;
+  _sineStartMs = millis();  // anchor before BEGIN: biases toward a fuller ring
+  _sineActive = true;
 
-  // STREAM_BEGIN: mono PCM16. intensity rides the gain field (device-mixed).
+  // STREAM_BEGIN: mono PCM16, open-ended (total_samples=0; device ignores it).
+  // intensity rides the gain field (device-mixed). It is unacked UDP and gates
+  // the whole stream — a single loss = total silence — so send it a few times
+  // with a small gap. The device only flushes its ring on BEGIN if residual
+  // exceeds ~32 ms (512 frames); here residual is ~0, so the dupes are no-ops.
   uint8_t hdr[64];
-  streamSend(hdr, hapbeat::buildStreamBegin(hdr, sizeof(hdr), nextSeq(), rate, 1,
-                                            hapbeat::FORMAT_PCM16, totalSamples,
-                                            intensity, target));
+  const size_t beginLen = hapbeat::buildStreamBegin(hdr, sizeof(hdr), nextSeq(), _sineRate, 1,
+                                                    hapbeat::FORMAT_PCM16, 0, intensity, target);
+  for (int i = 0; i < 3; ++i) {
+    streamSend(hdr, beginLen);
+    delay(1);
+  }
+  pumpSine();  // prime the ring (bounded to kSineMaxChunksPerPump per call)
+}
 
-  int16_t pcm[CHUNK];
-  uint8_t pkt[hapbeat::HEADER_SIZE + 4 + CHUNK * 2];
-  float phase = 0.0f;
-  const float dphase = 2.0f * (float)PI * freqHz / (float)rate;
-  const int16_t amp = (int16_t)(0.8f * 32767.0f);  // 0.8 headroom; loudness via gain
-  uint32_t sent = 0, byteOffset = 0;
-  const uint32_t startMs = millis();
-
-  // Keep ~160 ms of audio buffered in the device's ~256 ms ring so Wi-Fi jitter
-  // never starves playback. (Just-in-time pacing underran on any network hiccup,
-  // which was heard as choppiness.) We send chunks as fast as possible until the
-  // estimated ring depth reaches the target, then top it up as the device drains.
-  const uint32_t targetLead = (uint32_t)rate * 160 / 1000;  // ~2560 samples (~160 ms)
-  while (sent < totalSamples) {
-    const uint32_t elapsedMs = millis() - startMs;
-    const uint32_t consumed = (uint32_t)((uint64_t)elapsedMs * rate / 1000);
-    const uint32_t buffered = (sent > consumed) ? (sent - consumed) : 0;
-    if (buffered >= targetLead) {
-      delay(2);  // ring well-filled; yield to Wi-Fi/other tasks, then re-check
-      continue;
-    }
-    const uint16_t cnt =
-        (totalSamples - sent < CHUNK) ? (uint16_t)(totalSamples - sent) : CHUNK;
-    for (uint16_t i = 0; i < cnt; ++i) {
-      pcm[i] = (int16_t)(amp * sinf(phase));
-      phase += dphase;
-      if (phase >= 2.0f * (float)PI) phase -= 2.0f * (float)PI;
+void Hapbeat::pumpSine() {
+  if (!_sineActive) return;
+  int16_t pcm[kSineChunk];
+  uint8_t pkt[hapbeat::HEADER_SIZE + 4 + kSineChunk * 2];
+  // Top the device ring up to the lead target; self-paces (sends nothing once
+  // full). Phase-continuous across calls. Bounded per call so the prime/catch-up
+  // is spread over several invocations instead of one synchronous TX storm.
+  for (int chunks = 0; chunks < kSineMaxChunksPerPump; ++chunks) {
+    const uint32_t elapsedMs = millis() - _sineStartMs;
+    const uint32_t consumed = (uint32_t)((uint64_t)elapsedMs * _sineRate / 1000);
+    const uint32_t buffered = (_sineSent > consumed) ? (_sineSent - consumed) : 0;
+    if (buffered >= kSineTargetLead) break;
+    for (uint16_t i = 0; i < kSineChunk; ++i) {
+      pcm[i] = (int16_t)(_sineAmp * sinf(_sinePhase));
+      _sinePhase += _sineDphase;
+      if (_sinePhase >= 2.0f * (float)PI) _sinePhase -= 2.0f * (float)PI;
     }
     // PCM16 little-endian: native byte order on ESP32 / common Arduino MCUs.
-    streamSend(pkt, hapbeat::buildStreamData(pkt, sizeof(pkt), nextSeq(), byteOffset,
-                                             (const uint8_t*)pcm, (size_t)cnt * 2));
-    sent += cnt;
-    byteOffset += (uint32_t)cnt * 2;
+    const bool ok = streamSend(pkt,
+        hapbeat::buildStreamData(pkt, sizeof(pkt), nextSeq(), _sineByteOffset,
+                                 (const uint8_t*)pcm, (size_t)kSineChunk * 2));
+    // TX queue full: stop topping up this call (don't count un-sent audio, or
+    // the open-loop estimate would overshoot the device's true ring depth).
+    if (!ok) break;
+    _sineSent += kSineChunk;
+    _sineByteOffset += (uint32_t)kSineChunk * 2;
   }
+}
 
-  streamSend(hdr, hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq()));
+void Hapbeat::endSine() {
+  if (!_sineActive) return;
+  _sineActive = false;
+  // STREAM_END is also unacked; resend a few times so a lost END can't leave the
+  // device streaming (it would otherwise drain its ~160 ms tail and re-gate).
+  uint8_t hdr[64];
+  const size_t endLen = hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq());
+  for (int i = 0; i < 3; ++i) {
+    streamSend(hdr, endLen);
+    delay(1);
+  }
+}
+
+void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs, const char* target) {
+  if (!_ready) return;
+  beginSine(freqHz, intensity, target);
+  const uint32_t startMs = millis();
+  while (millis() - startMs < durationMs) {
+    pumpSine();
+    delay(2);  // yield to Wi-Fi/other tasks between top-ups
+  }
+  endSine();
 }

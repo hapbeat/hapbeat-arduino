@@ -31,12 +31,14 @@ void setup() {
 
   M5.Display.fillScreen(TFT_BLACK);
   M5.Display.setCursor(0, 0);
-  M5.Display.println("Hapbeat sine\nA: 150Hz strong\nB: 400Hz soft");
+  M5.Display.println("Hapbeat sine\nA: 160Hz strong\nB: 400Hz soft");
 }
 
 void loop() {
   M5.update();
   // playSine(frequencyHz, intensity 0..1, durationMs) — pure synthesis, no WAV.
-  if (M5.BtnA.wasPressed()) hb.playSine(150.0f, 0.7f, 400);  // low, strong
+  // BtnA = 160 Hz: the no-kit-needed default, and the one button single-button
+  // boards (M5 ATOM etc.) have — so it works as a first test on any board.
+  if (M5.BtnA.wasPressed()) hb.playSine(160.0f, 0.7f, 400);  // low, strong
   if (M5.BtnB.wasPressed()) hb.playSine(400.0f, 0.4f, 300);  // high, soft
 }

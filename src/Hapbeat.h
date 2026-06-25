@@ -37,11 +37,20 @@ class Hapbeat {
   void setDeviceIp(IPAddress ip) { _deviceIp = ip; }
 
   // Stream a synthesized sine wave (PCM16, generated on the fly — no stored
-  // audio). Blocks for ~durationMs while streaming.
+  // audio). Blocks for ~durationMs while streaming. One-shot convenience wrapper
+  // around beginSine()/pumpSine()/endSine().
   //   freqHz:    tone frequency (Hz)
   //   intensity: 0..1, sent as the stream gain (device-side mix level)
   void playSine(float freqHz, float intensity, uint32_t durationMs,
                 const char* target = "");
+
+  // Continuous (open-ended) synthesized-sine stream — for hold-to-play / live
+  // control. Call beginSine() once, then pumpSine() frequently (every loop())
+  // to keep the device ring filled, and endSine() to stop. Non-blocking.
+  void beginSine(float freqHz, float intensity, const char* target = "");
+  void pumpSine();
+  void endSine();
+  bool sineActive() const { return _sineActive; }
 
   // Tell the device this app is leaving (clears the OLED app name).
   void end();
@@ -58,10 +67,23 @@ class Hapbeat {
   IPAddress _deviceIp{(uint32_t)0};  // 0.0.0.0 = not discovered -> broadcast
   char _appName[hapbeat::MAX_APP_NAME_LEN + 1] = {0};
 
+  // Continuous-sine streaming state (beginSine/pumpSine/endSine).
+  bool _sineActive = false;
+  float _sinePhase = 0.0f;
+  float _sineDphase = 0.0f;
+  int16_t _sineAmp = 0;
+  uint16_t _sineRate = 16000;
+  uint32_t _sineSent = 0;        // samples generated so far
+  uint32_t _sineByteOffset = 0;  // STREAM_DATA offset (informational)
+  uint32_t _sineStartMs = 0;     // pacing reference
+
   uint16_t nextSeq() { return ++_seq; }
-  void sendPacket(const uint8_t* buf, size_t len);                  // broadcast
-  void sendTo(const uint8_t* buf, size_t len, IPAddress ip);        // unicast
-  void streamSend(const uint8_t* buf, size_t len);                  // unicast if discovered
+  // Send helpers return false if the packet could not be enqueued (endPacket()
+  // == 0, i.e. the lwIP/Wi-Fi TX path was full). Streaming uses this to keep the
+  // open-loop buffer estimate honest instead of counting un-sent audio.
+  bool sendPacket(const uint8_t* buf, size_t len);                  // broadcast
+  bool sendTo(const uint8_t* buf, size_t len, IPAddress ip);        // unicast
+  bool streamSend(const uint8_t* buf, size_t len);                  // unicast if discovered
   void connectStatus(bool connected);
 };
 

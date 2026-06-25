@@ -4,9 +4,9 @@
 // buttons) AND boards with physical buttons (Core / Fire / Atom / StickC — use
 // BtnA/B/C). CoreS3 has no physical buttons, so this draws three tappable
 // on-screen buttons:
-//   A -> fire a kit event   (command mode, HAPBEAT_EVENT)
-//   B -> stream a 150 Hz sine
-//   C -> stream a 400 Hz sine
+//   A -> fire a kit event        (command mode, HAPBEAT_EVENT)
+//   B -> sine 80 Hz, one-shot     (tap = ~500 ms burst)
+//   C -> sine 160 Hz, hold        (vibrates while held; release to stop)
 //
 // Fill in secrets.h (copy from secrets.h.example) before flashing.
 
@@ -15,6 +15,12 @@
 #include <Hapbeat.h>
 
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS, HAPBEAT_EVENT
+
+// Set to 1 to force the UDP-broadcast path (skip discovery) so you can A/B it
+// against unicast on the same hardware/network. 0 = discover + unicast (smoother).
+#ifndef FORCE_BROADCAST
+#define FORCE_BROADCAST 0
+#endif
 
 Hapbeat hb;
 bool g_wifi_ok = false;
@@ -34,7 +40,7 @@ void layoutButtons() {
   const int gap = 6;
   const int bh = (H - HEADER_H - gap * 4) / 3;
   const uint16_t colors[3] = {TFT_NAVY, TFT_DARKGREEN, TFT_MAROON};
-  const char* labels[3] = {"A: play", "B: sine 80Hz", "C: sine 160Hz"};
+  const char* labels[3] = {"A: play", "B: 80Hz 1shot", "C: 160Hz HOLD"};
   for (int i = 0; i < 3; ++i) {
     g_btns[i] = {gap, HEADER_H + gap + i * (bh + gap), W - 2 * gap, bh, colors[i], labels[i]};
   }
@@ -76,18 +82,34 @@ void drawScreen() {
   for (int i = 0; i < 3; ++i) drawButton(i, false);
 }
 
-void doAction(int i) {
-  drawButton(i, true);  // visual feedback
+int g_holdBtn = -1;  // index of the button currently driving a hold stream (C)
+
+// A / B: one-shot (fires once per tap; B blocks ~500 ms while streaming).
+void fireOneshot(int i) {
+  drawButton(i, true);
   if (g_wifi_ok) {
     if (i == 0)
       hb.play(HAPBEAT_EVENT, 0.7f);
-    else if (i == 1)
+    else  // i == 1
       hb.playSine(80.0f, 0.8f, 500);
-    else
-      hb.playSine(160.0f, 0.8f, 500);
   }
   delay(90);
   drawButton(i, false);
+}
+
+// C: hold-to-play — start a continuous sine on press, pump it while held.
+void startHold(int i) {
+  if (g_holdBtn >= 0) return;
+  g_holdBtn = i;
+  drawButton(i, true);
+  if (g_wifi_ok) hb.beginSine(160.0f, 0.8f);
+}
+
+void stopHold() {
+  if (g_holdBtn < 0) return;
+  if (g_wifi_ok) hb.endSine();
+  drawButton(g_holdBtn, false);
+  g_holdBtn = -1;
 }
 
 bool inButton(const UiButton& b, int x, int y) {
@@ -110,7 +132,15 @@ void setup() {
 
   if (g_wifi_ok) {
     hb.begin(7700, "M5Test");
-    hb.discover(1500);  // find the Hapbeat -> unicast streaming (much smoother)
+#if !FORCE_BROADCAST
+    // Find the Hapbeat -> unicast streaming (Wi-Fi MAC-ACK + retry = much
+    // smoother). Retry a few times: the device may not have answered the first
+    // broadcast PING yet. Falls back to broadcast if nothing replies.
+    for (int i = 0; i < 3 && (uint32_t)hb.deviceIp() == 0; ++i) {
+      hb.discover(800);
+      if ((uint32_t)hb.deviceIp() == 0) delay(150);
+    }
+#endif
   }
   drawScreen();
 }
@@ -118,19 +148,28 @@ void setup() {
 void loop() {
   M5.update();
 
-  // Physical buttons (Core / Core2 / Fire / Atom / StickC).
-  if (M5.BtnA.wasPressed()) doAction(0);
-  if (M5.BtnB.wasPressed()) doAction(1);
-  if (M5.BtnC.wasPressed()) doAction(2);
+#if HB_SINGLE_BUTTON
+  // Single-button boards (M5 ATOM / AtomS3 / StampS3): the lone button drives
+  // the kit-free 160 Hz sine (HOLD), so a first test needs no kit deployed.
+  if (M5.BtnA.wasPressed()) startHold(2);
+  if (M5.BtnA.wasReleased()) stopHold();
+#else
+  // Multi-button boards: A=play (command) / B=80Hz 1shot / C=160Hz HOLD.
+  if (M5.BtnA.wasPressed()) fireOneshot(0);
+  if (M5.BtnB.wasPressed()) fireOneshot(1);
+  if (M5.BtnC.wasPressed()) startHold(2);
+  if (M5.BtnC.wasReleased()) stopHold();
 
   // Touch screen (CoreS3 / Core2). On non-touch boards this never fires.
   auto t = M5.Touch.getDetail();
   if (t.wasPressed()) {
-    for (int i = 0; i < 3; ++i) {
-      if (inButton(g_btns[i], t.x, t.y)) {
-        doAction(i);
-        break;
-      }
-    }
+    if (inButton(g_btns[0], t.x, t.y)) fireOneshot(0);
+    else if (inButton(g_btns[1], t.x, t.y)) fireOneshot(1);
+    else if (inButton(g_btns[2], t.x, t.y)) startHold(2);
   }
+  if (t.wasReleased() && g_holdBtn == 2) stopHold();
+#endif
+
+  // Keep the hold stream's ring topped up while a hold is active.
+  if (hb.sineActive()) hb.pumpSine();
 }
