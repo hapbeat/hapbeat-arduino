@@ -28,6 +28,14 @@ class Hapbeat {
   void stopAll(const char* target = "");
   void ping();
 
+  // Discover a Hapbeat on the LAN (broadcast PING -> PONG) and remember its IP.
+  // Streaming then unicasts to it, which is far smoother than UDP broadcast
+  // (broadcast frames are unacked, low-rate, and lossy on Wi-Fi). Call once
+  // after begin(). Returns true if a device replied within timeoutMs.
+  bool discover(uint32_t timeoutMs = 1500);
+  IPAddress deviceIp() const { return _deviceIp; }
+  void setDeviceIp(IPAddress ip) { _deviceIp = ip; }
+
   // Stream a synthesized sine wave (PCM16, generated on the fly — no stored
   // audio). Blocks for ~durationMs while streaming.
   //   freqHz:    tone frequency (Hz)
@@ -47,10 +55,13 @@ class Hapbeat {
   uint16_t _seq = 0;
   uint8_t _group = 0;
   bool _ready = false;
+  IPAddress _deviceIp{(uint32_t)0};  // 0.0.0.0 = not discovered -> broadcast
   char _appName[hapbeat::MAX_APP_NAME_LEN + 1] = {0};
 
   uint16_t nextSeq() { return ++_seq; }
-  void sendPacket(const uint8_t* buf, size_t len);
+  void sendPacket(const uint8_t* buf, size_t len);                  // broadcast
+  void sendTo(const uint8_t* buf, size_t len, IPAddress ip);        // unicast
+  void streamSend(const uint8_t* buf, size_t len);                  // unicast if discovered
   void connectStatus(bool connected);
 };
 

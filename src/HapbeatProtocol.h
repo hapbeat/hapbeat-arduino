@@ -32,6 +32,10 @@ constexpr uint8_t CMD_STREAM_BEGIN = 0x30;
 constexpr uint8_t CMD_STREAM_DATA = 0x31;
 constexpr uint8_t CMD_STREAM_END = 0x32;
 
+// Response types (device -> SDK)
+constexpr uint8_t CMD_PONG = 0x11;
+constexpr uint8_t CMD_ERROR = 0xff;
+
 constexpr uint8_t FORMAT_PCM16 = 0;
 constexpr uint8_t FORMAT_IMA_ADPCM = 1;
 

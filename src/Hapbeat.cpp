@@ -10,7 +10,7 @@ bool Hapbeat::begin(uint16_t port, const char* appName) {
     strncpy(_appName, appName, hapbeat::MAX_APP_NAME_LEN);
     _appName[hapbeat::MAX_APP_NAME_LEN] = '\0';
   }
-  _udp.begin(0);  // ephemeral local port for sending; PONG receive is level-2
+  _udp.begin(_port);  // bind 7700 to send and to receive PONG replies (discovery)
   _ready = true;
   if (_appName[0]) connectStatus(true);
   return true;
@@ -21,6 +21,45 @@ void Hapbeat::sendPacket(const uint8_t* buf, size_t len) {
   _udp.beginPacket(IPAddress(255, 255, 255, 255), _port);
   _udp.write(buf, len);
   _udp.endPacket();
+}
+
+void Hapbeat::sendTo(const uint8_t* buf, size_t len, IPAddress ip) {
+  if (!_ready || len == 0) return;
+  _udp.beginPacket(ip, _port);
+  _udp.write(buf, len);
+  _udp.endPacket();
+}
+
+void Hapbeat::streamSend(const uint8_t* buf, size_t len) {
+  // Unicast to a discovered device (Wi-Fi MAC-ACK + retry = far fewer drops,
+  // ~ESP-NOW reliability); fall back to broadcast if not discovered.
+  if ((uint32_t)_deviceIp != 0)
+    sendTo(buf, len, _deviceIp);
+  else
+    sendPacket(buf, len);
+}
+
+bool Hapbeat::discover(uint32_t timeoutMs) {
+  if (!_ready) return false;
+  uint8_t buf[16];
+  sendPacket(buf, hapbeat::buildPing(buf, sizeof(buf), nextSeq(), (int64_t)millis() * 1000));
+  const uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    const int sz = _udp.parsePacket();
+    if (sz >= (int)hapbeat::HEADER_SIZE) {
+      uint8_t rb[16];
+      _udp.read(rb, sizeof(rb));
+      const bool magic_ok = rb[0] == (uint8_t)(hapbeat::MAGIC & 0xFF) &&
+                            rb[1] == (uint8_t)((hapbeat::MAGIC >> 8) & 0xFF);
+      if (magic_ok && rb[2] == hapbeat::VERSION && rb[3] == hapbeat::CMD_PONG) {
+        _deviceIp = _udp.remoteIP();  // unicast stream target
+        return true;
+      }
+    } else {
+      delay(5);
+    }
+  }
+  return false;
 }
 
 void Hapbeat::play(const char* eventId, float gain, const char* target) {
@@ -66,7 +105,7 @@ void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs, const
 
   // STREAM_BEGIN: mono PCM16. intensity rides the gain field (device-mixed).
   uint8_t hdr[64];
-  sendPacket(hdr, hapbeat::buildStreamBegin(hdr, sizeof(hdr), nextSeq(), rate, 1,
+  streamSend(hdr, hapbeat::buildStreamBegin(hdr, sizeof(hdr), nextSeq(), rate, 1,
                                             hapbeat::FORMAT_PCM16, totalSamples,
                                             intensity, target));
 
@@ -99,11 +138,11 @@ void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs, const
       if (phase >= 2.0f * (float)PI) phase -= 2.0f * (float)PI;
     }
     // PCM16 little-endian: native byte order on ESP32 / common Arduino MCUs.
-    sendPacket(pkt, hapbeat::buildStreamData(pkt, sizeof(pkt), nextSeq(), byteOffset,
+    streamSend(pkt, hapbeat::buildStreamData(pkt, sizeof(pkt), nextSeq(), byteOffset,
                                              (const uint8_t*)pcm, (size_t)cnt * 2));
     sent += cnt;
     byteOffset += (uint32_t)cnt * 2;
   }
 
-  sendPacket(hdr, hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq()));
+  streamSend(hdr, hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq()));
 }

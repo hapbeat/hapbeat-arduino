@@ -55,7 +55,10 @@ void drawScreen() {
     M5.Display.setTextColor(TFT_GREEN);
     M5.Display.setTextSize(2);
     M5.Display.setCursor(6, 6);
-    M5.Display.printf("Ready %s", WiFi.localIP().toString().c_str());
+    if ((uint32_t)hb.deviceIp() != 0)
+      M5.Display.printf("uni %s", hb.deviceIp().toString().c_str());
+    else
+      M5.Display.print("broadcast (no dev)");
     M5.Display.setTextColor(TFT_WHITE);
     M5.Display.setCursor(6, 36);
     M5.Display.printf("A=%s", HAPBEAT_EVENT);
@@ -105,7 +108,10 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(200);
   g_wifi_ok = (WiFi.status() == WL_CONNECTED);
 
-  if (g_wifi_ok) hb.begin(7700, "M5Test");
+  if (g_wifi_ok) {
+    hb.begin(7700, "M5Test");
+    hb.discover(1500);  // find the Hapbeat -> unicast streaming (much smoother)
+  }
   drawScreen();
 }
 
