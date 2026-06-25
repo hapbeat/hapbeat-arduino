@@ -1,10 +1,12 @@
 // Multi-board functional test for the Hapbeat Arduino library.
 //
-// M5Unified makes this one sketch run on every M5 model. Buttons (touch on
-// CoreS3, physical on Core/Core2, single BtnA on Atom/StickC):
-//   A -> fire a kit event   (command mode)
-//   B -> stream a 150 Hz sine (strong)
-//   C -> stream a 400 Hz sine (soft)   [boards with a 3rd button]
+// Works on M5 boards with a touch screen (CoreS3, Core2 — tap the on-screen
+// buttons) AND boards with physical buttons (Core / Fire / Atom / StickC — use
+// BtnA/B/C). CoreS3 has no physical buttons, so this draws three tappable
+// on-screen buttons:
+//   A -> fire a kit event   (command mode, HAPBEAT_EVENT)
+//   B -> stream a 150 Hz sine
+//   C -> stream a 400 Hz sine
 //
 // Fill in secrets.h (copy from secrets.h.example) before flashing.
 
@@ -15,34 +17,103 @@
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS, HAPBEAT_EVENT
 
 Hapbeat hb;
+bool g_wifi_ok = false;
+
+struct UiButton {
+  int x, y, w, h;
+  uint16_t color;
+  const char* label;
+};
+UiButton g_btns[3];
+
+static const int HEADER_H = 40;
+
+void layoutButtons() {
+  const int W = M5.Display.width();
+  const int H = M5.Display.height();
+  const int gap = 6;
+  const int bh = (H - HEADER_H - gap * 4) / 3;
+  const uint16_t colors[3] = {TFT_NAVY, TFT_DARKGREEN, TFT_MAROON};
+  const char* labels[3] = {"A: play", "B: sine 150Hz", "C: sine 400Hz"};
+  for (int i = 0; i < 3; ++i) {
+    g_btns[i] = {gap, HEADER_H + gap + i * (bh + gap), W - 2 * gap, bh, colors[i], labels[i]};
+  }
+}
+
+void drawButton(int i, bool active) {
+  const UiButton& b = g_btns[i];
+  M5.Display.fillRoundRect(b.x, b.y, b.w, b.h, 8, active ? TFT_WHITE : b.color);
+  M5.Display.setTextColor(active ? TFT_BLACK : TFT_WHITE);
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(b.x + 10, b.y + b.h / 2 - 8);
+  M5.Display.print(b.label);
+}
+
+void drawScreen() {
+  M5.Display.fillScreen(TFT_BLACK);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(4, 4);
+  if (g_wifi_ok) {
+    M5.Display.printf("Hapbeat ready  IP %s\nA = %s", WiFi.localIP().toString().c_str(), HAPBEAT_EVENT);
+  } else {
+    M5.Display.print("Hapbeat: WiFi FAILED\nedit secrets.h, reflash");
+  }
+  layoutButtons();
+  for (int i = 0; i < 3; ++i) drawButton(i, false);
+}
+
+void doAction(int i) {
+  drawButton(i, true);  // visual feedback
+  if (g_wifi_ok) {
+    if (i == 0)
+      hb.play(HAPBEAT_EVENT, 0.7f);
+    else if (i == 1)
+      hb.playSine(150.0f, 0.7f, 400);
+    else
+      hb.playSine(400.0f, 0.4f, 300);
+  }
+  delay(90);
+  drawButton(i, false);
+}
+
+bool inButton(const UiButton& b, int x, int y) {
+  return x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h;
+}
 
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
-  M5.Display.setTextSize(2);
-  M5.Display.println("Hapbeat test");
-  M5.Display.println("WiFi...");
+  M5.Display.setTextSize(1);
+  M5.Display.setCursor(4, 4);
+  M5.Display.print("Hapbeat\nconnecting WiFi...");
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(200);
+  g_wifi_ok = (WiFi.status() == WL_CONNECTED);
 
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setCursor(0, 0);
-  if (WiFi.status() != WL_CONNECTED) {
-    M5.Display.println("WiFi FAILED\nedit secrets.h");
-    return;
-  }
-
-  hb.begin(7700, "M5Test");  // app name shows on the Hapbeat OLED
-  M5.Display.printf("Hapbeat ready\nIP %s\n\nA: play\nB: sine 150Hz\nC: sine 400Hz\n",
-                    WiFi.localIP().toString().c_str());
+  if (g_wifi_ok) hb.begin(7700, "M5Test");
+  drawScreen();
 }
 
 void loop() {
   M5.update();
-  if (M5.BtnA.wasPressed()) hb.play(HAPBEAT_EVENT, 0.7f);
-  if (M5.BtnB.wasPressed()) hb.playSine(150.0f, 0.7f, 400);
-  if (M5.BtnC.wasPressed()) hb.playSine(400.0f, 0.4f, 300);
+
+  // Physical buttons (Core / Core2 / Fire / Atom / StickC).
+  if (M5.BtnA.wasPressed()) doAction(0);
+  if (M5.BtnB.wasPressed()) doAction(1);
+  if (M5.BtnC.wasPressed()) doAction(2);
+
+  // Touch screen (CoreS3 / Core2). On non-touch boards this never fires.
+  auto t = M5.Touch.getDetail();
+  if (t.wasPressed()) {
+    for (int i = 0; i < 3; ++i) {
+      if (inButton(g_btns[i], t.x, t.y)) {
+        doAction(i);
+        break;
+      }
+    }
+  }
 }
