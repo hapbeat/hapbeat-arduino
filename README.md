@@ -9,7 +9,7 @@ ESP8266, and Arduino-compatible Wi-Fi boards**.
 Two ways to make haptics, no stored audio required:
 
 - **Command (fire) mode** — trigger a clip that lives in the kit on the device
-  (`hb.play("impact.hit")`). The MCU stores nothing; it just sends a ~30-byte trigger.
+  (`hb.play("sample-kit.sine_100hz")`). The MCU stores nothing; it just sends a ~30-byte trigger.
 - **Synthesized sine streaming** — generate a sine on the MCU and stream it
   (`hb.playSine(freqHz, intensity, durationMs)`). Frequency and intensity are
   live parameters — expressive without any WAV files.
@@ -48,13 +48,13 @@ void setup() {
 
 void loop() {
   // ... on some input:
-  hb.play("impact.hit", 0.6f);         // fire a kit event (id must be in the kit)
+  hb.play("sample-kit.sine_100hz", 0.6f);         // fire a kit event (id must be in the kit)
   // or synthesize:
   hb.playSine(150.0f, 0.7f, 400);      // 150 Hz, intensity 0.7, 400 ms
 }
 ```
 
-`"impact.hit"` must be an event id present in the **kit deployed to the device**
+`"sample-kit.sine_100hz"` must be an event id present in the **kit deployed to the device**
 via [Hapbeat Studio](https://devtools.hapbeat.com).
 
 ## Examples

@@ -26,20 +26,21 @@ Commands: `0x01` PLAY · `0x02` STOP · `0x03` STOP_ALL · `0x10` PING ·
 Payload: `event_id` (null-terminated UTF-8) + `target` (null-terminated; `""` =
 all devices) + `target_time` (i64 µs, `0` = now) + `gain` (f32, 0..1).
 
-**Worked example** — play event `impact.hit` on all devices at gain `0.6`:
+**Worked example** — play event `sample-kit.sine_100hz` on all devices at gain `0.6`:
 
 ```
-header : 42 48 01 01 01 00 18 00
-         └magic┘ V  C  └seq┘ └len=24┘
-payload: 69 6d 70 61 63 74 2e 68 69 74 00   "impact.hit\0"
+header : 42 48 01 01 01 00 23 00
+         └magic┘ V  C  └seq┘ └len=35┘
+payload: 73 61 6d 70 6c 65 2d 6b 69 74 2e 73 69 6e 65 5f 31 30 30 68 7a 00
+                                            "sample-kit.sine_100hz\0"
          00                                  target "" (\0)
          00 00 00 00 00 00 00 00             target_time = 0 (i64)
          9a 99 19 3f                         gain = 0.6 (f32 LE)
 ```
 
-32 bytes total → UDP to `255.255.255.255:7700`. That single packet makes the
-device play its `impact.hit` clip. (The clip must exist in the kit you deployed
-with Hapbeat Studio.)
+43 bytes total → UDP to `255.255.255.255:7700`. That single packet makes the
+device play its `sample-kit.sine_100hz` clip — deploy the `sample-kit` in Hapbeat
+Studio (it appears automatically when you pick a Kit folder).
 
 ## STOP (0x02) / STOP_ALL (0x03)
 

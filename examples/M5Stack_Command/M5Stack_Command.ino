@@ -34,6 +34,6 @@ void setup() {
 void loop() {
   M5.update();
   // Event ids must exist in the kit deployed to your Hapbeat device.
-  if (M5.BtnA.wasPressed()) hb.play("impact.hit", 0.6f);
-  if (M5.BtnB.wasPressed()) hb.play("click.soft", 0.3f);
+  if (M5.BtnA.wasPressed()) hb.play("sample-kit.sine_100hz", 0.6f);
+  if (M5.BtnB.wasPressed()) hb.play("sample-kit.sine_50hz", 0.3f);
 }
