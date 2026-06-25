@@ -24,6 +24,7 @@ void setup() {
   M5.Display.println("Hapbeat sine\nconnecting WiFi...");
 
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setSleep(false);  // streaming: keep the radio awake to avoid choppiness
   while (WiFi.status() != WL_CONNECTED) delay(200);
 
   hb.begin(7700, "M5Sine");

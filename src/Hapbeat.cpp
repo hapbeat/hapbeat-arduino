@@ -78,7 +78,19 @@ void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs, const
   uint32_t sent = 0, byteOffset = 0;
   const uint32_t startMs = millis();
 
+  // Keep ~160 ms of audio buffered in the device's ~256 ms ring so Wi-Fi jitter
+  // never starves playback. (Just-in-time pacing underran on any network hiccup,
+  // which was heard as choppiness.) We send chunks as fast as possible until the
+  // estimated ring depth reaches the target, then top it up as the device drains.
+  const uint32_t targetLead = (uint32_t)rate * 160 / 1000;  // ~2560 samples (~160 ms)
   while (sent < totalSamples) {
+    const uint32_t elapsedMs = millis() - startMs;
+    const uint32_t consumed = (uint32_t)((uint64_t)elapsedMs * rate / 1000);
+    const uint32_t buffered = (sent > consumed) ? (sent - consumed) : 0;
+    if (buffered >= targetLead) {
+      delay(2);  // ring well-filled; yield to Wi-Fi/other tasks, then re-check
+      continue;
+    }
     const uint16_t cnt =
         (totalSamples - sent < CHUNK) ? (uint16_t)(totalSamples - sent) : CHUNK;
     for (uint16_t i = 0; i < cnt; ++i) {
@@ -91,11 +103,6 @@ void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs, const
                                              (const uint8_t*)pcm, (size_t)cnt * 2));
     sent += cnt;
     byteOffset += (uint32_t)cnt * 2;
-    // Pace ~real-time so the device's ~256 ms ring buffer never overflows,
-    // keeping a tiny lead so it never underruns.
-    const uint32_t dueMs = startMs + (uint32_t)((uint64_t)sent * 1000 / rate);
-    const int32_t wait = (int32_t)(dueMs - millis());
-    if (wait > 1) delay((uint32_t)(wait - 1));
   }
 
   sendPacket(hdr, hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq()));

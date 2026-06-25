@@ -34,7 +34,7 @@ void layoutButtons() {
   const int gap = 6;
   const int bh = (H - HEADER_H - gap * 4) / 3;
   const uint16_t colors[3] = {TFT_NAVY, TFT_DARKGREEN, TFT_MAROON};
-  const char* labels[3] = {"A: play", "B: sine 150Hz", "C: sine 400Hz"};
+  const char* labels[3] = {"A: play", "B: sine 80Hz", "C: sine 160Hz"};
   for (int i = 0; i < 3; ++i) {
     g_btns[i] = {gap, HEADER_H + gap + i * (bh + gap), W - 2 * gap, bh, colors[i], labels[i]};
   }
@@ -79,9 +79,9 @@ void doAction(int i) {
     if (i == 0)
       hb.play(HAPBEAT_EVENT, 0.7f);
     else if (i == 1)
-      hb.playSine(150.0f, 0.7f, 400);
+      hb.playSine(80.0f, 0.8f, 500);
     else
-      hb.playSine(400.0f, 0.4f, 300);
+      hb.playSine(160.0f, 0.8f, 500);
   }
   delay(90);
   drawButton(i, false);
@@ -100,6 +100,7 @@ void setup() {
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.setSleep(false);  // keep the radio awake -> low-jitter UDP streaming
   uint32_t t0 = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - t0 < 15000) delay(200);
   g_wifi_ok = (WiFi.status() == WL_CONNECTED);
