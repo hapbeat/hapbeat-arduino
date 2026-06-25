@@ -26,7 +26,7 @@ struct UiButton {
 };
 UiButton g_btns[3];
 
-static const int HEADER_H = 40;
+static const int HEADER_H = 64;
 
 void layoutButtons() {
   const int W = M5.Display.width();
@@ -51,13 +51,23 @@ void drawButton(int i, bool active) {
 
 void drawScreen() {
   M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setTextColor(TFT_WHITE);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(4, 4);
   if (g_wifi_ok) {
-    M5.Display.printf("Hapbeat ready  IP %s\nA = %s", WiFi.localIP().toString().c_str(), HAPBEAT_EVENT);
+    M5.Display.setTextColor(TFT_GREEN);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(6, 6);
+    M5.Display.printf("Ready %s", WiFi.localIP().toString().c_str());
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(6, 36);
+    M5.Display.printf("A=%s", HAPBEAT_EVENT);
   } else {
-    M5.Display.print("Hapbeat: WiFi FAILED\nedit secrets.h, reflash");
+    M5.Display.setTextColor(TFT_RED);
+    M5.Display.setTextSize(3);
+    M5.Display.setCursor(6, 6);
+    M5.Display.print("WiFi FAILED");
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(6, 40);
+    M5.Display.print("edit secrets.h");
   }
   layoutButtons();
   for (int i = 0; i < 3; ++i) drawButton(i, false);
@@ -84,9 +94,9 @@ bool inButton(const UiButton& b, int x, int y) {
 void setup() {
   auto cfg = M5.config();
   M5.begin(cfg);
-  M5.Display.setTextSize(1);
-  M5.Display.setCursor(4, 4);
-  M5.Display.print("Hapbeat\nconnecting WiFi...");
+  M5.Display.setTextSize(2);
+  M5.Display.setCursor(6, 6);
+  M5.Display.print("Hapbeat\nWiFi...");
 
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASS);
