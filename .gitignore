@@ -13,8 +13,8 @@ Thumbs.db
 
 # Dev-only files live in the workspace (private), per repo policy:
 #   hapbeat-sdk-workspace/subrepo-devs/arduino/
+# (AGENTS.md is a tracked, user-facing distributed file — like the python/js SDKs.)
 CLAUDE.md
-AGENTS.md
 instructions/
 .claude/
 dev-notes/

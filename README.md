@@ -4,7 +4,7 @@ Drive [Hapbeat](https://hapbeat.com) haptic devices from a microcontroller over
 Wi-Fi UDP. Press a button → a Hapbeat buzzes. Works on **ESP32-series, M5Stack,
 ESP8266, and Arduino-compatible Wi-Fi boards**.
 
-> **📚 Docs**: <https://devtools.hapbeat.com/docs/sdk-integration/>
+> **📚 Docs**: <https://devtools.hapbeat.com/docs/sdk-integration/arduino-sdk/getting-started/>
 
 Two ways to make haptics, no stored audio required:
 
