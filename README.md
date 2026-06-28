@@ -19,16 +19,12 @@ relying on it; ESP-NOW transport and richer synthesis are future work.
 
 ## Install
 
-Until this draft is published to the Arduino Library index, install from source:
-
-- **Arduino IDE**: download this repo as a ZIP → *Sketch → Include Library → Add
-  .ZIP Library*.
+- **Arduino IDE**: Library Manager → search **"Hapbeat"** → Install. (Or *Sketch
+  → Include Library → Add .ZIP Library* from a repo ZIP.)
 - **PlatformIO**: add to `lib_deps`:
   ```
-  lib_deps = https://github.com/hapbeat/hapbeat-arduino.git
+  lib_deps = hapbeat/arduino@^0.1.0
   ```
-
-Once published, it will also be in the **Arduino Library Manager** (search "Hapbeat").
 
 The library itself has **no dependencies**. The examples use **M5Unified**.
 

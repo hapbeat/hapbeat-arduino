@@ -35,10 +35,9 @@ id must exist in the kit deployed to the device.
 
 ## Install
 
-- **Arduino IDE**: Library Manager → search "Hapbeat" (once published), or
-  *Sketch → Include Library → Add .ZIP Library* from a repo ZIP.
-- **PlatformIO**: `lib_deps = https://github.com/hapbeat/hapbeat-arduino.git`
-  (or the registry slug once published).
+- **Arduino IDE**: Library Manager → search "Hapbeat", or *Sketch → Include
+  Library → Add .ZIP Library* from a repo ZIP.
+- **PlatformIO**: `lib_deps = hapbeat/arduino@^0.1.0`
 
 ## Quick start
 
