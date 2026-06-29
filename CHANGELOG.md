@@ -1,38 +1,38 @@
 # Changelog
 
-All notable changes to the **Hapbeat** Arduino library (`hapbeat-arduino`).
+**Hapbeat** Arduino ライブラリ（`hapbeat-arduino`）の主要な変更点をまとめます。
 
-## 0.1.0 — first public release
+## 0.1.0 — 初の公開リリース
 
-Level-1 Arduino / ESP32 / M5Stack library to drive Hapbeat haptic devices over
-Wi-Fi UDP. The library has **zero dependencies** (the examples use M5Unified).
+Hapbeat 触覚デバイスを Wi-Fi UDP で駆動する level-1 の Arduino / ESP32 / M5Stack
+ライブラリ。**依存ゼロ**です（サンプルのみ M5Unified を使用）。
 
-### Command (fire) mode
-- `play(eventId, gain, target)` / `stop` / `stopAll` / `ping` / `setGroup`.
-- Fires a kit event by id (`<kit-name>.<file-name>`); the waveform lives in the
-  kit deployed to the device via Hapbeat Studio. The MCU sends a ~30-byte
-  trigger and stores nothing.
+### command（fire）モード
+- `play(eventId, gain, target)` / `stop` / `stopAll` / `ping` / `setGroup`。
+- kit イベントを id（`<kit-name>.<file-name>`）で発火します。波形は Hapbeat Studio で
+  デバイスに導入した kit 側にあり、MCU は約 30 バイトのトリガーを送るだけで何も保存しません。
 
-### Synthesized sine (no kit, no WAV)
-- `playSine(freqHz, intensity, durationMs)` — one-shot.
-- `beginSine` / `pumpSine` / `endSine` / `sineActive` — continuous, open-ended
-  stream for hold-to-play and live frequency/intensity control.
-- 16 kHz mono PCM16 generated on the MCU; a ~160 ms sender lead buffer absorbs
-  Wi-Fi jitter against the device's ~256 ms ring.
-- Reliability: `STREAM_BEGIN`/`STREAM_END` are resent (a lost BEGIN would mute
-  the whole stream); the prime/catch-up burst is bounded per `pumpSine()` call.
+### 合成サイン波（kit 不要・WAV 不要）
+- `playSine(freqHz, intensity, durationMs)` — ワンショット。
+- `beginSine` / `pumpSine` / `endSine` / `sineActive` — 連続・オープンエンドな
+  ストリーム。押している間の再生や、周波数 / 強度のライブ制御に使えます。
+- 16 kHz モノラル PCM16 を MCU 上で生成。約 160 ms の送信先行バッファが Wi-Fi の
+  ジッターをデバイス側の約 256 ms リングに対して吸収します。
+- 信頼性: `STREAM_BEGIN` / `STREAM_END` は再送します（BEGIN を取りこぼすとストリーム
+  全体が無音になるため）。prime / catch-up バーストは `pumpSine()` 呼び出しごとに上限を設けます。
 
-### Discovery & addressing
-- `discover()` / `deviceIp()` / `setDeviceIp()` — broadcast PING → PONG learns
-  the device IP so streaming can **unicast** (Wi-Fi MAC ACK + retry = far
-  smoother than broadcast). Falls back to broadcast when no device is found.
-- `target` addressing: `""` (broadcast), `"player_1/chest"`, `"*/chest"`,
-  `"group_<N>"`.
+### 検出とアドレッシング
+- `discover()` / `deviceIp()` / `setDeviceIp()` — ブロードキャスト PING → PONG で
+  デバイス IP を学習し、ストリーミングを **unicast** できます（Wi-Fi MAC の ACK + リトライで
+  ブロードキャストよりはるかに滑らか）。デバイスが見つからない場合はブロードキャストに
+  フォールバックします。
+- `target` アドレッシング: `""`（ブロードキャスト）、`"player_1/chest"`、`"*/chest"`、
+  `"group_<N>"`。
 
-### Interop
-- Wire format byte-compatible with `hapbeat-contracts` and the Python / Unity /
-  JS SDKs (see `docs/wire-format.md`).
+### 相互運用
+- ワイヤーフォーマットは `hapbeat-contracts` および Python / Unity / JS SDK と
+  バイト互換です（`docs/wire-format.md` 参照）。
 
-### Not yet (future work)
-- ESP-NOW transport (router-free), stored-WAV / clip streaming, an EventMap
-  tuning layer, and richer synthesis.
+### 未対応（今後の予定）
+- ESP-NOW transport（ルーター不要）、保存 WAV / clip ストリーミング、EventMap による
+  調整レイヤー、より高度な合成。
