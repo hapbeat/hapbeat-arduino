@@ -142,6 +142,7 @@ class Hapbeat {
   void pollPongsThrottled();            // pollPongs() at most every 100 ms
   void rememberDevice(IPAddress ip, bool pinned = false);
   bool isAlive(const KnownDevice& d) const;
+  uint8_t aliveCount() const;           // no polling (unlike deviceCount())
 };
 
 #endif  // HAPBEAT_H

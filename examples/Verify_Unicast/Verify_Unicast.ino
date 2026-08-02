@@ -68,6 +68,7 @@ void setup() {
 
 void loop() {
   hb.pumpSine();   // keeps the device ring fed; self-paces
+  hb.poll();       // consume PONGs even during the broadcast-only phase
 
   // Devices age out of the table after 15 s without a PONG, and only a PING
   // makes them reply. Without this, unicast would silently fall back to

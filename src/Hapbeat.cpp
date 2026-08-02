@@ -42,9 +42,17 @@ bool Hapbeat::sendTo(const uint8_t* buf, size_t len, IPAddress ip) {
 // not address.
 bool Hapbeat::sendRouted(const uint8_t* buf, size_t len) {
   if (!_ready || len == 0) return false;
-  if (_broadcastOnly) return sendPacket(buf, len);
 
+  // Poll BEFORE the broadcast-only branch, not after. Arriving PONGs are only
+  // consumed here and in poll()/deviceCount(), so skipping this while
+  // broadcast-only is set would let the whole table age out: switching back to
+  // unicast would then find 0 devices and silently keep broadcasting until
+  // something else happened to poll. Found on hardware, where a sketch that
+  // toggles setBroadcastOnly() reported devices=0 after one 15 s broadcast
+  // phase.
   pollPongsThrottled();  // keep the table fresh without the sketch having to
+
+  if (_broadcastOnly) return sendPacket(buf, len);
 
   bool anyKnown = false;
   bool sent = false;
@@ -64,6 +72,13 @@ bool Hapbeat::isAlive(const KnownDevice& d) const {
   if (d.pinned) return true;
   // Unsigned subtraction, so this stays correct across the millis() wrap.
   return (millis() - d.lastPongMs) < _deviceTimeoutMs;
+}
+
+uint8_t Hapbeat::aliveCount() const {
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+    if (isAlive(_devices[i])) ++n;
+  return n;
 }
 
 void Hapbeat::rememberDevice(IPAddress ip, bool pinned) {
@@ -102,6 +117,15 @@ void Hapbeat::pollPongs() {
     if (sz < (int)hapbeat::HEADER_SIZE) return;
     uint8_t rb[16];
     const int n = _udp.read(rb, sizeof(rb));
+    // Only the header is needed, but the REST OF THE DATAGRAM MUST BE DROPPED:
+    // ESP32's WiFiUDP::parsePacket() starts with `if (rx_buffer) return 0;`, so
+    // leaving a partially-read packet in the buffer makes every later call
+    // return 0 — reception wedges permanently. A device PONG is ~60 bytes
+    // (header + timestamps + name/address/firmware), so reading 16 always
+    // leaves a remainder. Found on hardware: the table emptied 15 s after
+    // discover() and never refilled, silently dropping unicast back to
+    // broadcast. remoteIP() is unaffected by flush().
+    _udp.flush();
     if (n < (int)hapbeat::HEADER_SIZE) continue;
     const bool magic_ok = rb[0] == (uint8_t)(hapbeat::MAGIC & 0xFF) &&
                           rb[1] == (uint8_t)((hapbeat::MAGIC >> 8) & 0xFF);
@@ -121,10 +145,7 @@ void Hapbeat::poll() { pollPongs(); }
 
 uint8_t Hapbeat::deviceCount() {
   pollPongsThrottled();
-  uint8_t n = 0;
-  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
-    if (isAlive(_devices[i])) ++n;
-  return n;
+  return aliveCount();
 }
 
 IPAddress Hapbeat::deviceIp() {
@@ -226,19 +247,30 @@ void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
                                                     hapbeat::FORMAT_PCM16, 0, intensity, target);
   for (int i = 0; i < 3; ++i) {
     sendRouted(hdr, beginLen);
+    // Stays at 1 ms. Tried 3 ms to spread the N-destination burst, and it made
+    // things WORSE on hardware (ENOMEM 8/50s -> 31/65s): the extra blocking
+    // deepens the ring deficit, so pumpSine catches up harder afterwards.
     delay(1);
   }
-  pumpSine();  // prime the ring (bounded to kSineMaxChunksPerPump per call)
+  pumpSine();  // prime the ring (bounded per call, and per destination count)
 }
 
 void Hapbeat::pumpSine() {
   if (!_sineActive) return;
   int16_t pcm[kSineChunk];
   uint8_t pkt[hapbeat::HEADER_SIZE + 4 + kSineChunk * 2];
+  // Unicasting to N devices multiplies the packet rate by N, so bound the burst
+  // in PACKETS rather than chunks — otherwise the prime burst scales with the
+  // fleet and exhausts the lwIP TX pool. Observed on hardware the moment
+  // streaming to 2 devices started: a burst of
+  // `endPacket(): could not send data: 12` (ENOMEM). Sends are dropped there,
+  // which is a hole in the audio.
+  const uint8_t dests = _broadcastOnly ? 1 : (aliveCount() > 0 ? aliveCount() : 1);
+  const int maxChunks = (kSineMaxChunksPerPump + dests - 1) / dests;  // ceil, >= 1
   // Top the device ring up to the lead target; self-paces (sends nothing once
   // full). Phase-continuous across calls. Bounded per call so the prime/catch-up
   // is spread over several invocations instead of one synchronous TX storm.
-  for (int chunks = 0; chunks < kSineMaxChunksPerPump; ++chunks) {
+  for (int chunks = 0; chunks < maxChunks; ++chunks) {
     const uint32_t elapsedMs = millis() - _sineStartMs;
     const uint32_t consumed = (uint32_t)((uint64_t)elapsedMs * _sineRate / 1000);
     const uint32_t buffered = (_sineSent > consumed) ? (_sineSent - consumed) : 0;
@@ -269,7 +301,7 @@ void Hapbeat::endSine() {
   const size_t endLen = hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq());
   for (int i = 0; i < 3; ++i) {
     sendRouted(hdr, endLen);
-    delay(1);
+    delay(1);  // see beginSine: longer blocking measured worse, not better
   }
 }
 
