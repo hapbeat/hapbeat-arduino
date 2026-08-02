@@ -61,7 +61,12 @@ bool Hapbeat::sendRouted(const uint8_t* buf, size_t len) {
     anyKnown = true;
     // One unreachable device must not stop the packet reaching the others,
     // so a failed send is skipped rather than aborting the loop.
-    if (sendTo(buf, len, _devices[i].ip)) sent = true;
+    if (sendTo(buf, len, _devices[i].ip)) {
+      sent = true;
+      _devices[i].fails = 0;
+    } else if (!_devices[i].pinned && ++_devices[i].fails >= kMaxSendFails) {
+      _devices[i] = KnownDevice();  // dead destination -- stop hammering it
+    }
   }
   if (anyKnown) return sent;
   return sendPacket(buf, len);  // nobody known yet -> broadcast
@@ -89,6 +94,7 @@ void Hapbeat::rememberDevice(IPAddress ip, bool pinned) {
     KnownDevice& d = _devices[i];
     if (d.ip == ip) {  // already known: refresh
       d.lastPongMs = millis();
+      d.fails = 0;  // it just answered, so it is reachable again
       if (pinned) d.pinned = true;
       return;
     }
@@ -106,6 +112,7 @@ void Hapbeat::rememberDevice(IPAddress ip, bool pinned) {
   _devices[slot].ip = ip;
   _devices[slot].lastPongMs = millis();
   _devices[slot].pinned = pinned;
+  _devices[slot].fails = 0;
 }
 
 void Hapbeat::pollPongs() {

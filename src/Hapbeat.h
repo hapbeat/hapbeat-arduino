@@ -105,7 +105,15 @@ class Hapbeat {
     IPAddress ip{(uint32_t)0};  // 0.0.0.0 = free slot
     uint32_t lastPongMs = 0;
     bool pinned = false;  // from setDeviceIp(): never expires
+    uint8_t fails = 0;    // consecutive send failures (see kMaxSendFails)
   };
+  // Consecutive failed unicasts before a destination is dropped. A device that
+  // was power-cycled onto a different IP leaves a dead entry behind, and every
+  // send to it fails while ARP retries -- which starves the TX pool the LIVE
+  // device's audio needs. Dropping it restores the stream (and PONGs re-add the
+  // device under its new IP within one ping). Reset on any success, so a
+  // transient TX-pool hiccup never evicts a healthy device.
+  static const uint8_t kMaxSendFails = 5;
 
   WiFiUDP _udp;
   uint16_t _port = 7700;
