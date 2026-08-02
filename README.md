@@ -26,7 +26,8 @@ relying on it; ESP-NOW transport and richer synthesis are future work.
   lib_deps = hapbeat/arduino@^0.2.0
   ```
 
-The library itself has **no dependencies**. The examples use **M5Unified**.
+The library itself has **no dependencies**. The `M5Stack_*` examples use
+**M5Unified**; `Verify_Unicast` needs nothing beyond Wi-Fi + Serial.
 
 ## Quick start
 
@@ -59,6 +60,7 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 |---|---|
 | `M5Stack_Command` | Btn A/B → fire kit events (`play`) |
 | `M5Stack_SineStream` | Btn A/B → stream a synthesized sine (`playSine`) |
+| `Verify_Unicast` | continuous 100 Hz sine, auto-alternating broadcast ⇄ unicast every 15 s (release check — no display library needed) |
 
 (Single-button boards like M5 ATOM only have `BtnA` — use that one.)
 
