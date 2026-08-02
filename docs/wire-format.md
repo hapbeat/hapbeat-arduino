@@ -4,8 +4,13 @@ What to send to make a Hapbeat buzz, at the byte level — so you can replicate 
 from any language/MCU even without this library. Full spec:
 `hapbeat-contracts/specs/message-format.md`.
 
-- Transport: **UDP** to **port 7700**, sent to the **broadcast address**
-  `255.255.255.255` (devices self-filter by address). Same Wi-Fi/LAN as the device.
+- Transport: **UDP** to **port 7700**, on the same Wi-Fi/LAN as the device.
+  Send to a device's own IP once you know it (PONG); the **broadcast address**
+  `255.255.255.255` works too and is the fallback before discovery. Either way
+  devices self-filter by address, so the packet bytes are identical. Prefer
+  unicast: APs hold broadcast frames until their next DTIM beacon (100–300 ms)
+  whenever any client on the AP is power-saving, and broadcast gets no MAC
+  ACK/retry.
 - **All multi-byte fields are little-endian.**
 
 ## Header (8 bytes, every packet)

@@ -72,15 +72,22 @@ void loop() {
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
 | `ping()` | keep-alive / RTT probe |
 | `setGroup(group)` | group id sent in CONNECT_STATUS (level-1 default 0) |
-| `discover(timeoutMs = 1500)` | broadcast PING → PONG; remember the device IP for unicast streaming |
-| `deviceIp()` / `setDeviceIp(ip)` | read / override the discovered device IP |
+| `discover(timeoutMs = 1500)` | broadcast a PING and collect **every** PONG (blocks the full timeout); true if ≥1 replied |
+| `poll()` / `deviceCount()` / `deviceIp()` | drain pending PONGs (optional; sends do it too) / live device count / first device |
+| `setDeviceIp(ip)` | pin a device by IP (never expires); `0.0.0.0` clears pinned entries |
+| `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | liveness window (default 15 s) / force broadcast |
 | `playSine(freqHz, intensity, durationMs, target = "")` | one-shot synthesized sine (blocks ~durationMs) |
 | `beginSine(freqHz, intensity, target = "")` / `pumpSine()` / `endSine()` | continuous (open-ended) sine for hold-to-play / live control; call `pumpSine()` often from `loop()` |
 | `sineActive()` | is a continuous sine stream running |
 | `end()` | tell the device this app is leaving (clears the OLED app name) |
 
-`target`: `""` = broadcast to all; `"player_1/chest"`, `"*/chest"`,
-`"group_<N>"` to address devices.
+`target`: `""` = every device. Addresses are always
+`player_<N>/<position>/group_<M>` (defaults `player_1` / `group_1`) and matching
+is **positional** — segment *i* vs segment *i*, `*` covers one **whole**
+segment, a short target front-matches. So `"player_1/pos_neck"` and
+`"*/pos_neck"` work, but a group must be written **`"*/*/group_2"`**
+(`"group_2"` alone is compared against the player slot and never matches), and
+`"pos_*"` is **not** a wildcard (compared literally — write `"player_1/*"`).
 
 ## How streaming works (so you don't reinvent it)
 
@@ -89,9 +96,14 @@ void loop() {
 - The sender keeps ~160 ms of audio buffered ahead in the device's ~256 ms ring
   (the lead buffer absorbs Wi-Fi jitter). `pumpSine()` self-paces and is bounded
   per call — call it every `loop()` iteration; never block `loop()` > ~160 ms.
-- **Broadcast vs unicast**: UDP broadcast has no MAC ACK/retry (lossy → choppy).
-  `discover()` then unicast is far smoother (MAC ACK + retry). Prefer it for a
-  single device; broadcast for fan-out to many.
+- **Unicast by default**: commands and stream packets go to every device in the
+  table (populated by `discover()` / any PONG), and broadcast only while the
+  table is empty. Broadcast has no MAC ACK/retry (lossy → choppy) and is held
+  by the AP until its next DTIM beacon (100–300 ms) whenever any client is
+  power-saving. Call `ping()` every few seconds from `loop()` so devices don't
+  age out of the table (15 s default). `setBroadcastOnly(true)` reverts to
+  broadcast — better for firing many devices in lockstep, since N unicasts go
+  out one after another. Never both at once (a device would fire twice).
 
 ## Wire format / interop
 

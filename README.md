@@ -23,7 +23,7 @@ relying on it; ESP-NOW transport and richer synthesis are future work.
   → Include Library → Add .ZIP Library* from a repo ZIP.)
 - **PlatformIO**: add to `lib_deps`:
   ```
-  lib_deps = hapbeat/arduino@^0.1.0
+  lib_deps = hapbeat/arduino@^0.2.0
   ```
 
 The library itself has **no dependencies**. The examples use **M5Unified**.
@@ -71,13 +71,46 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
 | `playSine(freqHz, intensity, durationMs, target = "")` | stream a synthesized sine |
 | `ping()` / `end()` | keep-alive probe / announce disconnect |
+| `discover(timeoutMs = 1500)` | broadcast a PING and collect every reply |
+| `poll()` / `deviceCount()` / `deviceIp()` | device table upkeep and inspection |
+| `setDeviceIp(ip)` / `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | routing controls |
 
-`target`: `""` = broadcast to all; `"player_1/chest"`, `"*/chest"` to address devices.
+### Addressing
+
+`target`: `""` = every device. Matching is **positional** — segment *i* of the
+target is compared with segment *i* of the device address, `*` stands for one
+**whole** segment (`pos_*` is compared literally, so use `player_1/*`), and a
+short target front-matches.
+
+Device addresses are always `player_<N>/<position>/group_<M>`, defaulting to
+`player_1` / `group_1`. So `"player_1/pos_neck"` and `"*/pos_neck"` work as you
+would expect, but to select a **group** you must fill the earlier slots:
+`"*/*/group_2"`. Plain `"group_2"` is compared against the *player* slot and
+never matches.
 
 ## Network
 
 The MCU and the Hapbeat must be on the same Wi-Fi/LAN (or the Hapbeat acting as
-a SoftAP that the MCU joins). The library sends UDP broadcast on port 7700.
+a SoftAP that the MCU joins). The library sends on UDP port 7700.
+
+Commands and streams are **unicast** to every device that has answered a PING,
+and broadcast only while no device is known. Wi-Fi APs hold broadcast frames
+until their next DTIM beacon (100–300 ms) whenever any client on the AP is
+power-saving — that shows up as a late buzz and as stuttering streams — and
+broadcast frames are also unacked and sent at the lowest rate. Unicast avoids
+both.
+
+```cpp
+hb.begin(7700, "MyDevice");
+hb.discover();            // one PING, collects every reply (blocks ~1.5 s)
+// ... and in loop(), every few seconds:
+hb.ping();                // keeps the device table (and therefore unicast) alive
+```
+
+Devices drop out of the table after `setDeviceTimeout()` (15 s default) without
+a PONG, at which point sends fall back to broadcast. Call `setBroadcastOnly(true)`
+to always broadcast — worth it when many devices must fire in lockstep, since
+one broadcast reaches them all at once while N unicasts go out one after another.
 
 ## How it works at the byte level
 

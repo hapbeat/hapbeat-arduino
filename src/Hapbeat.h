@@ -21,20 +21,58 @@ class Hapbeat {
   bool begin(uint16_t port = 7700, const char* appName = "");
 
   // Fire a kit event by id (must exist in the kit deployed to the device via
-  // Hapbeat Studio). gain is 0..1. target "" = broadcast to all devices;
-  // e.g. "player_1/chest" or "*/chest".
+  // Hapbeat Studio). gain is 0..1. target "" = all devices; e.g.
+  // "player_1/pos_neck" or "*/pos_neck".
+  //
+  // Matching is POSITIONAL: segment i of the target is compared with segment i
+  // of the device address, "*" stands for one whole segment (not a substring:
+  // "pos_*" is compared literally), and a short target front-matches. Device
+  // addresses are always "player_<N>/<position>/group_<M>", so to select a
+  // group alone you must fill the earlier slots: "*/*/group_2". "group_2" on
+  // its own is compared against the player slot and never matches.
   void play(const char* eventId, float gain = 1.0f, const char* target = "");
   void stop(const char* eventId, const char* target = "");
   void stopAll(const char* target = "");
   void ping();
 
-  // Discover a Hapbeat on the LAN (broadcast PING -> PONG) and remember its IP.
-  // Streaming then unicasts to it, which is far smoother than UDP broadcast
-  // (broadcast frames are unacked, low-rate, and lossy on Wi-Fi). Call once
-  // after begin(). Returns true if a device replied within timeoutMs.
+  // Discover Hapbeats on the LAN (broadcast PING -> PONG) and remember their
+  // IPs. Commands and streaming then unicast to them, which is both smoother
+  // and lower-latency than UDP broadcast: broadcast frames are unacked and
+  // low-rate, and an AP holds them until its next DTIM beacon (100-300 ms)
+  // whenever any client on it is power-saving. Call once after begin().
+  //
+  // Blocks for the whole timeout (it collects every reply, not just the first)
+  // and returns true if at least one device replied. Devices drop out of the
+  // table if they go quiet for longer than setDeviceTimeout(), so call ping()
+  // every few seconds in loop() to keep unicast alive — once the table is
+  // empty, sends fall back to broadcast.
   bool discover(uint32_t timeoutMs = 1500);
-  IPAddress deviceIp() const { return _deviceIp; }
-  void setDeviceIp(IPAddress ip) { _deviceIp = ip; }
+
+  // Consume any PONGs that have arrived, without blocking. Sends do this
+  // themselves (rate-limited), so calling it is optional; do call it from
+  // loop() if you want the device table to track changes promptly.
+  void poll();
+
+  // Devices heard from within the liveness window (plus any pinned by
+  // setDeviceIp). 0 = sends fall back to broadcast.
+  uint8_t deviceCount();
+  // First known device, or 0.0.0.0 if none. With several devices, prefer
+  // deviceCount(); this exists for single-device sketches.
+  IPAddress deviceIp();
+  // Pin a device by IP, skipping discovery. Pinned entries never expire.
+  // Pass 0.0.0.0 to clear them.
+  void setDeviceIp(IPAddress ip);
+
+  // How long a device stays a unicast destination after its last PONG
+  // (default 15 s = three 5 s pings). Pinned entries ignore this.
+  void setDeviceTimeout(uint32_t ms) { _deviceTimeoutMs = ms; }
+
+  // Force broadcast for everything, as before unicast routing existed.
+  // Worth it when many devices must fire in lockstep: one broadcast reaches
+  // them all at once, whereas N unicasts go out one after another (~3-8 ms
+  // spread over 20 devices). Below ~10 devices unicast is the better default
+  // — it is acked, retried, and sent at the full link rate.
+  void setBroadcastOnly(bool on) { _broadcastOnly = on; }
 
   // Stream a synthesized sine wave (PCM16, generated on the fly — no stored
   // audio). Blocks for ~durationMs while streaming. One-shot convenience wrapper
@@ -59,12 +97,25 @@ class Hapbeat {
   void setGroup(uint8_t group) { _group = group; }
 
  private:
+  // Known devices. Fixed size — no dynamic allocation on an MCU. 8 covers the
+  // sketch-driven setups this library targets; beyond that, broadcast (see
+  // setBroadcastOnly) is the better fit anyway.
+  static const uint8_t MAX_DEVICES = 8;
+  struct KnownDevice {
+    IPAddress ip{(uint32_t)0};  // 0.0.0.0 = free slot
+    uint32_t lastPongMs = 0;
+    bool pinned = false;  // from setDeviceIp(): never expires
+  };
+
   WiFiUDP _udp;
   uint16_t _port = 7700;
   uint16_t _seq = 0;
   uint8_t _group = 0;
   bool _ready = false;
-  IPAddress _deviceIp{(uint32_t)0};  // 0.0.0.0 = not discovered -> broadcast
+  KnownDevice _devices[MAX_DEVICES];
+  uint32_t _deviceTimeoutMs = 15000;  // 3 pings at the usual 5 s interval
+  uint32_t _lastPollMs = 0;
+  bool _broadcastOnly = false;
   char _appName[hapbeat::MAX_APP_NAME_LEN + 1] = {0};
 
   // Continuous-sine streaming state (beginSine/pumpSine/endSine).
@@ -83,8 +134,14 @@ class Hapbeat {
   // open-loop buffer estimate honest instead of counting un-sent audio.
   bool sendPacket(const uint8_t* buf, size_t len);                  // broadcast
   bool sendTo(const uint8_t* buf, size_t len, IPAddress ip);        // unicast
-  bool streamSend(const uint8_t* buf, size_t len);                  // unicast if discovered
+  bool sendRouted(const uint8_t* buf, size_t len);                  // unicast if known, else broadcast
   void connectStatus(bool connected);
+
+  // Device table
+  void pollPongs();                     // drain pending PONGs (non-blocking)
+  void pollPongsThrottled();            // pollPongs() at most every 100 ms
+  void rememberDevice(IPAddress ip, bool pinned = false);
+  bool isAlive(const KnownDevice& d) const;
 };
 
 #endif  // HAPBEAT_H

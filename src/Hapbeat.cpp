@@ -30,54 +30,151 @@ bool Hapbeat::sendTo(const uint8_t* buf, size_t len, IPAddress ip) {
   return _udp.endPacket() != 0;
 }
 
-bool Hapbeat::streamSend(const uint8_t* buf, size_t len) {
-  // Unicast to a discovered device (Wi-Fi MAC-ACK + retry = far fewer drops,
-  // ~ESP-NOW reliability); fall back to broadcast if not discovered.
-  if ((uint32_t)_deviceIp != 0)
-    return sendTo(buf, len, _deviceIp);
-  return sendPacket(buf, len);
+// Unicast to every device we have heard from; broadcast only while we know
+// none. Unicast frames are acked and retried by the MAC and are not held back
+// by the AP's DTIM buffering, so they arrive both more reliably and sooner
+// (broadcast can be delayed up to one beacon interval, 100-300 ms, whenever
+// any client on the AP is power-saving — including clients unrelated to us).
+//
+// Never both: firmware older than the (source ip, seq) dedupe would fire the
+// same PLAY twice. And the device re-applies the target filter on receipt, so
+// broadcasting while the table is empty cannot fire a device the target did
+// not address.
+bool Hapbeat::sendRouted(const uint8_t* buf, size_t len) {
+  if (!_ready || len == 0) return false;
+  if (_broadcastOnly) return sendPacket(buf, len);
+
+  pollPongsThrottled();  // keep the table fresh without the sketch having to
+
+  bool anyKnown = false;
+  bool sent = false;
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i) {
+    if (!isAlive(_devices[i])) continue;
+    anyKnown = true;
+    // One unreachable device must not stop the packet reaching the others,
+    // so a failed send is skipped rather than aborting the loop.
+    if (sendTo(buf, len, _devices[i].ip)) sent = true;
+  }
+  if (anyKnown) return sent;
+  return sendPacket(buf, len);  // nobody known yet -> broadcast
+}
+
+bool Hapbeat::isAlive(const KnownDevice& d) const {
+  if ((uint32_t)d.ip == 0) return false;
+  if (d.pinned) return true;
+  // Unsigned subtraction, so this stays correct across the millis() wrap.
+  return (millis() - d.lastPongMs) < _deviceTimeoutMs;
+}
+
+void Hapbeat::rememberDevice(IPAddress ip, bool pinned) {
+  if ((uint32_t)ip == 0) return;
+  int8_t free_slot = -1, oldest = -1;
+  uint32_t oldest_age = 0;
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i) {
+    KnownDevice& d = _devices[i];
+    if (d.ip == ip) {  // already known: refresh
+      d.lastPongMs = millis();
+      if (pinned) d.pinned = true;
+      return;
+    }
+    if (!isAlive(d)) {
+      free_slot = i;  // free or expired slot, reuse it
+    } else if (!d.pinned) {
+      const uint32_t age = millis() - d.lastPongMs;
+      if (oldest < 0 || age > oldest_age) { oldest = i; oldest_age = age; }
+    }
+  }
+  // Table full of live devices: evict the least recently heard from (never a
+  // pinned one). More than MAX_DEVICES on one LAN is a broadcast setup anyway.
+  const int8_t slot = (free_slot >= 0) ? free_slot : oldest;
+  if (slot < 0) return;
+  _devices[slot].ip = ip;
+  _devices[slot].lastPongMs = millis();
+  _devices[slot].pinned = pinned;
+}
+
+void Hapbeat::pollPongs() {
+  if (!_ready) return;
+  // Bounded so a burst of traffic cannot stall the caller (streaming calls
+  // this between audio chunks).
+  for (uint8_t guard = 0; guard < MAX_DEVICES; ++guard) {
+    const int sz = _udp.parsePacket();
+    if (sz < (int)hapbeat::HEADER_SIZE) return;
+    uint8_t rb[16];
+    const int n = _udp.read(rb, sizeof(rb));
+    if (n < (int)hapbeat::HEADER_SIZE) continue;
+    const bool magic_ok = rb[0] == (uint8_t)(hapbeat::MAGIC & 0xFF) &&
+                          rb[1] == (uint8_t)((hapbeat::MAGIC >> 8) & 0xFF);
+    if (magic_ok && rb[2] == hapbeat::VERSION && rb[3] == hapbeat::CMD_PONG)
+      rememberDevice(_udp.remoteIP());
+  }
+}
+
+void Hapbeat::pollPongsThrottled() {
+  const uint32_t now = millis();
+  if ((now - _lastPollMs) < 100) return;
+  _lastPollMs = now;
+  pollPongs();
+}
+
+void Hapbeat::poll() { pollPongs(); }
+
+uint8_t Hapbeat::deviceCount() {
+  pollPongsThrottled();
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+    if (isAlive(_devices[i])) ++n;
+  return n;
+}
+
+IPAddress Hapbeat::deviceIp() {
+  pollPongsThrottled();
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+    if (isAlive(_devices[i])) return _devices[i].ip;
+  return IPAddress((uint32_t)0);
+}
+
+void Hapbeat::setDeviceIp(IPAddress ip) {
+  if ((uint32_t)ip == 0) {  // clear pinned entries
+    for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+      if (_devices[i].pinned) _devices[i] = KnownDevice();
+    return;
+  }
+  rememberDevice(ip, /*pinned=*/true);
 }
 
 bool Hapbeat::discover(uint32_t timeoutMs) {
   if (!_ready) return false;
-  uint8_t buf[16];
-  sendPacket(buf, hapbeat::buildPing(buf, sizeof(buf), nextSeq(), (int64_t)millis() * 1000));
+  ping();
+  // Keep listening for the whole window instead of returning on the first
+  // reply: every device that answers becomes a unicast destination, and
+  // stopping early would leave a multi-device setup driving only one of them.
   const uint32_t t0 = millis();
   while (millis() - t0 < timeoutMs) {
-    const int sz = _udp.parsePacket();
-    if (sz >= (int)hapbeat::HEADER_SIZE) {
-      uint8_t rb[16];
-      _udp.read(rb, sizeof(rb));
-      const bool magic_ok = rb[0] == (uint8_t)(hapbeat::MAGIC & 0xFF) &&
-                            rb[1] == (uint8_t)((hapbeat::MAGIC >> 8) & 0xFF);
-      if (magic_ok && rb[2] == hapbeat::VERSION && rb[3] == hapbeat::CMD_PONG) {
-        _deviceIp = _udp.remoteIP();  // unicast stream target
-        return true;
-      }
-    } else {
-      delay(5);
-    }
+    pollPongs();
+    delay(5);
   }
-  return false;
+  return deviceCount() > 0;
 }
 
 void Hapbeat::play(const char* eventId, float gain, const char* target) {
   uint8_t buf[256];
-  sendPacket(buf, hapbeat::buildPlay(buf, sizeof(buf), nextSeq(), eventId, target, 0, gain));
+  sendRouted(buf, hapbeat::buildPlay(buf, sizeof(buf), nextSeq(), eventId, target, 0, gain));
 }
 
 void Hapbeat::stop(const char* eventId, const char* target) {
   uint8_t buf[256];
-  sendPacket(buf, hapbeat::buildStop(buf, sizeof(buf), nextSeq(), eventId, target));
+  sendRouted(buf, hapbeat::buildStop(buf, sizeof(buf), nextSeq(), eventId, target));
 }
 
 void Hapbeat::stopAll(const char* target) {
   uint8_t buf[128];
-  sendPacket(buf, hapbeat::buildStopAll(buf, sizeof(buf), nextSeq(), target));
+  sendRouted(buf, hapbeat::buildStopAll(buf, sizeof(buf), nextSeq(), target));
 }
 
 void Hapbeat::ping() {
   uint8_t buf[16];
+  // Broadcast: discovery has to reach devices we have not heard from yet.
   // millis()-based microseconds: fine for RTT — the device just echoes it back.
   sendPacket(buf, hapbeat::buildPing(buf, sizeof(buf), nextSeq(), (int64_t)millis() * 1000));
 }
@@ -128,7 +225,7 @@ void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
   const size_t beginLen = hapbeat::buildStreamBegin(hdr, sizeof(hdr), nextSeq(), _sineRate, 1,
                                                     hapbeat::FORMAT_PCM16, 0, intensity, target);
   for (int i = 0; i < 3; ++i) {
-    streamSend(hdr, beginLen);
+    sendRouted(hdr, beginLen);
     delay(1);
   }
   pumpSine();  // prime the ring (bounded to kSineMaxChunksPerPump per call)
@@ -152,7 +249,7 @@ void Hapbeat::pumpSine() {
       if (_sinePhase >= 2.0f * (float)PI) _sinePhase -= 2.0f * (float)PI;
     }
     // PCM16 little-endian: native byte order on ESP32 / common Arduino MCUs.
-    const bool ok = streamSend(pkt,
+    const bool ok = sendRouted(pkt,
         hapbeat::buildStreamData(pkt, sizeof(pkt), nextSeq(), _sineByteOffset,
                                  (const uint8_t*)pcm, (size_t)kSineChunk * 2));
     // TX queue full: stop topping up this call (don't count un-sent audio, or
@@ -171,7 +268,7 @@ void Hapbeat::endSine() {
   uint8_t hdr[64];
   const size_t endLen = hapbeat::buildStreamEnd(hdr, sizeof(hdr), nextSeq());
   for (int i = 0; i < 3; ++i) {
-    streamSend(hdr, endLen);
+    sendRouted(hdr, endLen);
     delay(1);
   }
 }
