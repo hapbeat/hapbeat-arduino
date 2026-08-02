@@ -162,6 +162,14 @@ IPAddress Hapbeat::deviceIp() {
   return IPAddress((uint32_t)0);
 }
 
+uint8_t Hapbeat::deviceIps(IPAddress* out, uint8_t maxOut) {
+  pollPongsThrottled();
+  uint8_t n = 0;
+  for (uint8_t i = 0; i < MAX_DEVICES && n < maxOut; ++i)
+    if (isAlive(_devices[i])) out[n++] = _devices[i].ip;
+  return n;
+}
+
 void Hapbeat::setDeviceIp(IPAddress ip) {
   if ((uint32_t)ip == 0) {  // clear pinned entries
     for (uint8_t i = 0; i < MAX_DEVICES; ++i)

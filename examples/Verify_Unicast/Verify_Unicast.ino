@@ -44,7 +44,7 @@ uint32_t lastScreenMs = 0;
 #ifdef HB_HAS_SCREEN
 // Phase banner. Colour carries the expectation at a glance so you can keep your
 // eyes on the device you are holding: red = the condition that should stutter.
-void drawPhase(uint8_t devices) {
+void drawPhase(uint8_t devices, const IPAddress* ips) {
   const uint16_t bg = broadcastPhase ? TFT_MAROON : TFT_DARKGREEN;
   M5.Display.fillScreen(bg);
   M5.Display.setTextColor(TFT_WHITE, bg);
@@ -59,15 +59,24 @@ void drawPhase(uint8_t devices) {
 
   M5.Display.setCursor(8, 80);
   M5.Display.printf("devices: %u\n", devices);
-  M5.Display.setCursor(8, 104);
-  M5.Display.printf("%d Hz  gain %.1f\n", (int)TONE_HZ, INTENSITY);
 
-  if (devices == 0) {
-    M5.Display.setCursor(8, 128);
-    M5.Display.println("(none known ->");
-    M5.Display.setCursor(8, 148);
-    M5.Display.println(" broadcasting)");
+  // The destination list is the thing to look at after a power cycle: a device
+  // that came back on a different IP shows up as an extra (dead) line here.
+  int y = 104;
+  for (uint8_t i = 0; i < devices && i < 3; ++i, y += 20) {
+    M5.Display.setCursor(8, y);
+    M5.Display.printf("-> %s", ips[i].toString().c_str());
   }
+  if (devices == 0) {
+    M5.Display.setCursor(8, y);
+    M5.Display.print("none known ->");
+    y += 20;
+    M5.Display.setCursor(8, y);
+    M5.Display.print("broadcasting");
+    y += 20;
+  }
+  M5.Display.setCursor(8, y);
+  M5.Display.printf("%d Hz  gain %.1f", (int)TONE_HZ, INTENSITY);
 
   // Static part of the countdown line; drawCountdown() fills in the digits.
   M5.Display.setCursor(8, M5.Display.height() - 24);
@@ -90,12 +99,17 @@ void drawCountdown() {
 void startPhase() {
   hb.endSine();
   hb.setBroadcastOnly(broadcastPhase);
-  const uint8_t devices = hb.deviceCount();
+  IPAddress ips[4];
+  const uint8_t devices = hb.deviceIps(ips, 4);
   Serial.printf("\n[%s] devices=%u  (%s)\n",
                 broadcastPhase ? "B] BROADCAST" : "A] UNICAST  ", devices,
                 broadcastPhase ? "expect stutter" : "expect smooth");
+  // Printing the actual destinations is what tells you, after a power cycle,
+  // whether the device came back on the same IP or left a stale entry behind.
+  for (uint8_t i = 0; i < devices; ++i)
+    Serial.printf("    -> %s\n", ips[i].toString().c_str());
 #ifdef HB_HAS_SCREEN
-  drawPhase(devices);
+  drawPhase(devices, ips);
 #endif
   hb.beginSine(TONE_HZ, INTENSITY);
   phaseStartMs = millis();

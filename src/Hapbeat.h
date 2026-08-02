@@ -62,6 +62,10 @@ class Hapbeat {
   // Pin a device by IP, skipping discovery. Pinned entries never expire.
   // Pass 0.0.0.0 to clear them.
   void setDeviceIp(IPAddress ip);
+  // Copy the current unicast destinations into `out` (up to `maxOut`), and
+  // return how many were written. Useful when a device is power-cycled: it
+  // shows whether it came back on the same IP or left a stale entry behind.
+  uint8_t deviceIps(IPAddress* out, uint8_t maxOut);
 
   // How long a device stays a unicast destination after its last PONG
   // (default 15 s = three 5 s pings). Pinned entries ignore this.
