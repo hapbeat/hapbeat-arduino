@@ -247,8 +247,17 @@ static const uint32_t kSineTargetLead = 16000 * 160 / 1000;  // ~2560 samples (~
 // tops up the remaining lead across subsequent calls.
 static const int kSineMaxChunksPerPump = 4;
 
+// Re-arming an ALREADY ACTIVE stream is allowed on purpose (no early return on
+// _sineActive). Sending endSine() + beginSine() back to back to restart is
+// actively dangerous when the two go out over different routes: a broadcast
+// STREAM_END is held by the AP's DTIM buffer for up to ~300 ms while a unicast
+// STREAM_BEGIN arrives immediately, so the device sees BEGIN then a late END
+// and the freshly started stream is killed. Observed on hardware as "the
+// unicast phase is silent, broadcast is fine". To merely change route, change
+// nothing about the stream at all -- the device does not look at where DATA
+// came from.
 void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
-  if (!_ready || _sineActive) return;
+  if (!_ready) return;
   if (intensity < 0.0f) intensity = 0.0f;
   if (intensity > 1.0f) intensity = 1.0f;
 

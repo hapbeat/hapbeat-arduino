@@ -97,7 +97,12 @@ void drawCountdown() {
 #endif
 
 void startPhase() {
-  hb.endSine();
+  // Deliberately NO endSine()/beginSine() here: the stream keeps running and
+  // only its route changes. Tearing it down and restarting would send
+  // STREAM_END over the OLD route and STREAM_BEGIN over the NEW one, and a
+  // broadcast END can be held by the AP's DTIM buffer long enough to arrive
+  // AFTER the unicast BEGIN -- killing the stream that just started. That is
+  // what made unicast phases silent on hardware.
   hb.setBroadcastOnly(broadcastPhase);
   IPAddress ips[4];
   const uint8_t devices = hb.deviceIps(ips, 4);
@@ -111,7 +116,7 @@ void startPhase() {
 #ifdef HB_HAS_SCREEN
   drawPhase(devices, ips);
 #endif
-  hb.beginSine(TONE_HZ, INTENSITY);
+  if (!hb.sineActive()) hb.beginSine(TONE_HZ, INTENSITY);  // first phase only
   phaseStartMs = millis();
 }
 
