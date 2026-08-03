@@ -210,9 +210,18 @@ void Hapbeat::stopAll(const char* target) {
 
 void Hapbeat::ping() {
   uint8_t buf[16];
+  // millis()-based microseconds: fine for RTT -- the device just echoes it back.
+  const size_t n = hapbeat::buildPing(buf, sizeof(buf), nextSeq(),
+                                      (int64_t)millis() * 1000);
   // Broadcast: discovery has to reach devices we have not heard from yet.
-  // millis()-based microseconds: fine for RTT — the device just echoes it back.
-  sendPacket(buf, hapbeat::buildPing(buf, sizeof(buf), nextSeq(), (int64_t)millis() * 1000));
+  sendPacket(buf, n);
+  // ALSO unicast to each known device. Two jobs: it proves the unicast path
+  // still works (the PONG refreshes the entry), and it keeps that host's MAC
+  // resolved so a later stream start is never the first unicast to it -- see
+  // beginSine() for why losing the first packets is fatal to a stream.
+  if (_broadcastOnly) return;
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+    if (isAlive(_devices[i])) sendTo(buf, n, _devices[i].ip);
 }
 
 void Hapbeat::connectStatus(bool connected) {
@@ -260,12 +269,16 @@ void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
   uint8_t hdr[64];
   const size_t beginLen = hapbeat::buildStreamBegin(hdr, sizeof(hdr), nextSeq(), _sineRate, 1,
                                                     hapbeat::FORMAT_PCM16, 0, intensity, target);
-  for (int i = 0; i < 3; ++i) {
-    sendRouted(hdr, beginLen);
-    // Stays at 1 ms. Tried 3 ms to spread the N-destination burst, and it made
-    // things WORSE on hardware (ENOMEM 8/50s -> 31/65s): the extra blocking
-    // deepens the ring deficit, so pumpSine catches up harder afterwards.
-    delay(1);
+  // Retry until sends actually SUCCEED, rather than firing a fixed burst and
+  // hoping. On hardware the TX path rejects the first unicast packets to a host
+  // (ENOMEM while lwIP resolves its MAC), and a fixed 3-packet burst fits
+  // entirely inside that window -- every copy lost, so the device gates out the
+  // whole stream and the result is total silence, not a glitch. Symptom seen:
+  // "unicast sometimes vibrates, usually not; broadcast always does".
+  int ok = 0;
+  for (int i = 0; i < 40 && ok < 3; ++i) {
+    if (sendRouted(hdr, beginLen)) ++ok;
+    delay(2);  // ~6 ms when healthy, up to ~80 ms while the TX path recovers
   }
   pumpSine();  // prime the ring (bounded per call, and per destination count)
 }
