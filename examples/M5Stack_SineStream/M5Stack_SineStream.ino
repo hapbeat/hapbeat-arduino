@@ -1,6 +1,6 @@
 // M5Stack_SineStream — stream a synthesized sine to Hapbeat, no kit needed.
 //
-//   A : 40 Hz  for a fixed duration
+//   A : 200 Hz for a fixed duration
 //   B : 100 Hz for a fixed duration
 //   C : 100 Hz for as long as you hold it
 //
@@ -20,7 +20,7 @@
 const char* WIFI_SSID = "YOUR_SSID";
 const char* WIFI_PASS = "YOUR_PASSWORD";
 
-const float FREQ_A = 40.0f;    // low: felt more as a push than a buzz
+const float FREQ_A = 200.0f;   // high: a sharp buzz, next to B's fuller 100 Hz
 const float FREQ_B = 100.0f;
 const float FREQ_C = 100.0f;   // same tone as B, so you can compare timed vs held
 const float INTENSITY = 0.6f;  // 0..1, sent as the stream gain
@@ -49,7 +49,7 @@ void drawButtons() {
   // 5/6 of its width, so the labels are placed to line up with them.
   const int h = M5.Display.height(), w = M5.Display.width();
   const int boxW = w / 3 - 8, boxH = 44, y = h - boxH - 4;
-  const char* labels[3] = {"A 40Hz", "B 100Hz", "C hold"};
+  const char* labels[3] = {"A 200Hz", "B 100Hz", "C hold"};
   const Playing states[3] = {TIMED_A, TIMED_B, HELD_C};
   for (int i = 0; i < 3; ++i) {
     const int x = 4 + i * (w / 3);
