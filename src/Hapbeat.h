@@ -88,7 +88,13 @@ class Hapbeat {
 
   // Continuous (open-ended) synthesized-sine stream — for hold-to-play / live
   // control. Call beginSine() once, then pumpSine() frequently (every loop())
-  // to keep the device ring filled, and endSine() to stop. Non-blocking.
+  // to keep the device ring filled, and endSine() to stop.
+  //
+  // beginSine() blocks for a few tens of ms while it fills the device's buffer
+  // (see its comment); pumpSine()/endSine() do not block. Calling beginSine()
+  // again while a tone is playing re-arms it — do NOT endSine() first just to
+  // restart, since a STREAM_END sent over a different route can overtake the
+  // new STREAM_BEGIN and kill the stream that just started.
   void beginSine(float freqHz, float intensity, const char* target = "");
   void pumpSine();
   void endSine();
@@ -155,6 +161,7 @@ class Hapbeat {
   void rememberDevice(IPAddress ip, bool pinned = false);
   bool isAlive(const KnownDevice& d) const;
   uint8_t aliveCount() const;           // no polling (unlike deviceCount())
+  uint32_t sineBuffered() const;        // samples the device should still hold
 };
 
 #endif  // HAPBEAT_H

@@ -113,8 +113,13 @@ void drawScreen() {
 // "release to stop" impossible, since neither buttons nor pumpSine() get
 // serviced meanwhile.
 void startTone(Playing which, float freqHz, uint32_t durationMs) {
-  hb.beginSine(freqHz, INTENSITY);   // re-arms if a tone is already running
+  // Light the button BEFORE starting the tone. Drawing blocks the loop for tens
+  // of ms, and doing that while a stream is running eats into the device's
+  // buffer; doing it first costs nothing.
   playing = which;
+  drawButtons();
+  shownPlaying = playing;
+  hb.beginSine(freqHz, INTENSITY);   // re-arms if a tone is already running
   stopAtMs = durationMs ? millis() + durationMs : 0;  // 0 = until released
 }
 

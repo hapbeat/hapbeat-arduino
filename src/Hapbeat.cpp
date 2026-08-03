@@ -204,6 +204,10 @@ void Hapbeat::stop(const char* eventId, const char* target) {
 }
 
 void Hapbeat::stopAll(const char* target) {
+  // "stop everything" includes the stream this sketch is sending. The Python
+  // and JS SDKs both end the active clip stream in stop_all()/stopAll(); doing
+  // less here would leave the sine running after the user asked for silence.
+  endSine();
   uint8_t buf[128];
   sendRouted(buf, hapbeat::buildStopAll(buf, sizeof(buf), nextSeq(), target));
 }
@@ -231,6 +235,10 @@ void Hapbeat::connectStatus(bool connected) {
 }
 
 void Hapbeat::end() {
+  // Stop the stream first: without this a sketch that calls end() mid-stream
+  // never sends STREAM_END, and the device keeps playing whatever is left in
+  // its ring with no way to be told to stop.
+  endSine();
   if (_ready && _appName[0]) connectStatus(false);
   _ready = false;
 }
@@ -256,6 +264,15 @@ static const int kSineMaxChunksPerPump = 4;
 // unicast phase is silent, broadcast is fine". To merely change route, change
 // nothing about the stream at all -- the device does not look at where DATA
 // came from.
+// Open-loop estimate of how much audio the device still has queued: what we
+// sent minus what real time says it has played. Nothing acknowledges a stream,
+// so this is the only feedback available.
+uint32_t Hapbeat::sineBuffered() const {
+  const uint32_t elapsedMs = millis() - _sineStartMs;
+  const uint32_t consumed = (uint32_t)((uint64_t)elapsedMs * _sineRate / 1000);
+  return (_sineSent > consumed) ? (_sineSent - consumed) : 0;
+}
+
 void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
   if (!_ready) return;
   if (intensity < 0.0f) intensity = 0.0f;
@@ -289,7 +306,16 @@ void Hapbeat::beginSine(float freqHz, float intensity, const char* target) {
     if (sendRouted(hdr, beginLen)) ++ok;
     delay(2);  // ~6 ms when healthy, up to ~80 ms while the TX path recovers
   }
-  pumpSine();  // prime the ring (bounded per call, and per destination count)
+  // Prime to the FULL lead before returning, rather than leaving the ring one
+  // pumpSine() deep (~64 ms) and trusting the caller's loop to top it up.
+  // Anything the sketch does right after starting -- redrawing a screen, an SD
+  // read -- blocks that loop, and on hardware a button-highlight redraw was
+  // enough to drain the shallow ring and be heard as a dropout a fixed moment
+  // after every press. Bounded so a dead network cannot hang the caller.
+  for (int i = 0; i < 40 && sineBuffered() < kSineTargetLead; ++i) {
+    pumpSine();
+    delay(1);
+  }
 }
 
 void Hapbeat::pumpSine() {
@@ -308,10 +334,7 @@ void Hapbeat::pumpSine() {
   // full). Phase-continuous across calls. Bounded per call so the prime/catch-up
   // is spread over several invocations instead of one synchronous TX storm.
   for (int chunks = 0; chunks < maxChunks; ++chunks) {
-    const uint32_t elapsedMs = millis() - _sineStartMs;
-    const uint32_t consumed = (uint32_t)((uint64_t)elapsedMs * _sineRate / 1000);
-    const uint32_t buffered = (_sineSent > consumed) ? (_sineSent - consumed) : 0;
-    if (buffered >= kSineTargetLead) break;
+    if (sineBuffered() >= kSineTargetLead) break;
     for (uint16_t i = 0; i < kSineChunk; ++i) {
       pcm[i] = (int16_t)(_sineAmp * sinf(_sinePhase));
       _sinePhase += _sineDphase;
