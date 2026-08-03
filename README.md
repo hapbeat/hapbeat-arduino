@@ -58,8 +58,8 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 
 | Example | What it does |
 |---|---|
-| `M5Stack_Command` | Btn A/B → fire kit events (`play`) |
-| `M5Stack_SineStream` | Btn A/B → stream a synthesized sine (`playSine`) |
+| `M5Stack_Command` | A/B → fire kit events, C → stop. Unicasts to discovered devices; the screen shows the button map and what it is sending to |
+| `M5Stack_SineStream` | A 40 Hz / B 100 Hz for a fixed time, C 100 Hz while held. No kit needed |
 | `Verify_Unicast` | continuous 100 Hz sine, auto-alternating broadcast ⇄ unicast every 15 s (release check — no display library needed) |
 
 (Single-button boards like M5 ATOM only have `BtnA` — use that one.)
