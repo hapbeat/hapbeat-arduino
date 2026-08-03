@@ -113,14 +113,16 @@ void drawScreen() {
 // "release to stop" impossible, since neither buttons nor pumpSine() get
 // serviced meanwhile.
 void startTone(Playing which, float freqHz, uint32_t durationMs) {
-  // Light the button BEFORE starting the tone. Drawing blocks the loop for tens
-  // of ms, and doing that while a stream is running eats into the device's
-  // buffer; doing it first costs nothing.
+  // Start the tone FIRST, then draw. Drawing blocks the loop for tens of ms, so
+  // putting it ahead of beginSine() would add exactly that much latency between
+  // the press and the buzz -- which is audible. It is safe to draw afterwards
+  // because beginSine() returns with the device's buffer already filled to its
+  // target lead, which is far more than a redraw consumes.
+  hb.beginSine(freqHz, INTENSITY);   // re-arms if a tone is already running
+  stopAtMs = durationMs ? millis() + durationMs : 0;  // 0 = until released
   playing = which;
   drawButtons();
   shownPlaying = playing;
-  hb.beginSine(freqHz, INTENSITY);   // re-arms if a tone is already running
-  stopAtMs = durationMs ? millis() + durationMs : 0;  // 0 = until released
 }
 
 void stopTone() {
