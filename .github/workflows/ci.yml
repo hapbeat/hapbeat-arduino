@@ -1,8 +1,18 @@
 name: CI
 
-# arduino-lint is the same check the Arduino Library Manager bot runs on the
-# registry-submission PR, so passing it here first avoids a rejected PR.
+# arduino-lint is the same check the Arduino Library Manager bot runs, so passing
+# it here first avoids a rejected release.
 # compile-sketches builds the examples against the ESP32 core + M5Unified.
+#
+# library-manager ruleset: `update` (not `submit`). `submit` is the ruleset for a
+# library that is not yet in the Library Manager index; it includes rule LP017
+# ("library name must not already be in use in the index"), which this library
+# necessarily violates now that it IS in the index
+# (https://github.com/hapbeat/hapbeat-arduino is listed in
+# arduino/library-registry repositories.txt). That made CI fail on every run from
+# the moment the registry PR was accepted (2026-06-29 onward). `update` is the
+# ruleset the Library Manager bot applies to already-indexed libraries on each new
+# release, so it is also the check that actually matters from here on.
 
 on:
   push:
@@ -15,10 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Arduino Lint (library-manager submit ruleset)
+      - name: Arduino Lint (library-manager update ruleset)
         uses: arduino/arduino-lint-action@v2
         with:
-          library-manager: submit
+          library-manager: update
           compliance: strict
           project-type: library
 
