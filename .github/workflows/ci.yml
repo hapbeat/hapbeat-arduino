@@ -14,7 +14,7 @@ jobs:
   arduino-lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Arduino Lint (library-manager submit ruleset)
         uses: arduino/arduino-lint-action@v2
         with:
@@ -31,7 +31,7 @@ jobs:
           - esp32:esp32:m5stack_core   # M5Stack Basic (ESP32)
           - esp32:esp32:m5stack_cores3 # M5Stack CoreS3 (ESP32-S3)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Compile examples
         uses: arduino/compile-sketches@v1
         with:
