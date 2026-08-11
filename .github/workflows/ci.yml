@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Arduino Lint (library-manager update ruleset)
-        uses: arduino/arduino-lint-action@v2
+        uses: arduino/arduino-lint-action@v3
         with:
           library-manager: update
           compliance: strict
