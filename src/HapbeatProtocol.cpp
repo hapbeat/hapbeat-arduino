@@ -66,13 +66,16 @@ size_t finish(Writer& w, size_t sizeCap) {
 namespace hapbeat {
 
 size_t buildPlay(uint8_t* out, size_t cap, uint16_t seq, const char* eventId,
-                 const char* target, int64_t targetTimeUs, float gain) {
+                 const char* target, int64_t targetTimeUs, float gain, float pan) {
+  if (pan < -1.0f) pan = -1.0f;
+  if (pan > 1.0f) pan = 1.0f;
   Writer w(out, cap);
   header(w, CMD_PLAY, seq);
   w.cstr(eventId);
   w.cstr(target);
   w.i64(targetTimeUs);
   w.f32(gain);
+  w.f32(pan);
   return finish(w, MAX_PACKET_SIZE);
 }
 

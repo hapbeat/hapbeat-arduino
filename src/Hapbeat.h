@@ -30,7 +30,12 @@ class Hapbeat {
   // addresses are always "player_<N>/<position>/group_<M>", so to select a
   // group alone you must fill the earlier slots: "*/*/group_2". "group_2" on
   // its own is compared against the player slot and never matches.
-  void play(const char* eventId, float gain = 1.0f, const char* target = "");
+  //
+  // pan is the left/right balance: -1 = left only, 0 = centre, +1 = right only
+  // (clamped to that range). It is a balance, not true panning — centre leaves
+  // both sides at full gain, and a device with a single actuator ignores it.
+  void play(const char* eventId, float gain = 1.0f, const char* target = "",
+            float pan = 0.0f);
   void stop(const char* eventId, const char* target = "");
   void stopAll(const char* target = "");
   void ping();

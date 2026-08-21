@@ -43,9 +43,14 @@ constexpr uint8_t FORMAT_IMA_ADPCM = 1;
 // returns the number of bytes written, or 0 if it would not fit or exceeds the
 // protocol size cap. `target`/`eventId` may be nullptr (treated as "").
 
-// PLAY (0x01): event_id\0 + target\0 + target_time(i64) + gain(f32). target "" = broadcast.
+// PLAY (0x01): event_id\0 + target\0 + target_time(i64) + gain(f32) + pan(f32).
+// target "" = broadcast. pan is the left/right balance (-1 = left only, 0 =
+// centre, +1 = right only) and is clamped to [-1, 1] here, so every sender goes
+// out spec-conformant; senders must always write it (a receiver that predates
+// the field just ignores the trailing 4 bytes).
 size_t buildPlay(uint8_t* out, size_t cap, uint16_t seq, const char* eventId,
-                 const char* target, int64_t targetTimeUs, float gain);
+                 const char* target, int64_t targetTimeUs, float gain,
+                 float pan = 0.0f);
 
 // STOP (0x02): event_id\0 + target\0.
 size_t buildStop(uint8_t* out, size_t cap, uint16_t seq, const char* eventId,

@@ -29,21 +29,23 @@ Commands: `0x01` PLAY · `0x02` STOP · `0x03` STOP_ALL · `0x10` PING ·
 ## PLAY (0x01) — fire a kit event
 
 Payload: `event_id` (null-terminated UTF-8) + `target` (null-terminated; `""` =
-all devices) + `target_time` (i64 µs, `0` = now) + `gain` (f32, 0..1).
+all devices) + `target_time` (i64 µs, `0` = now) + `gain` (f32, 0..1) + `pan`
+(f32, `-1` = left only … `0` = centre … `+1` = right only).
 
 **Worked example** — play event `sample-kit.sine_100hz` on all devices at gain `0.6`:
 
 ```
-header : 42 48 01 01 01 00 23 00
-         └magic┘ V  C  └seq┘ └len=35┘
+header : 42 48 01 01 01 00 27 00
+         └magic┘ V  C  └seq┘ └len=39┘
 payload: 73 61 6d 70 6c 65 2d 6b 69 74 2e 73 69 6e 65 5f 31 30 30 68 7a 00
                                             "sample-kit.sine_100hz\0"
          00                                  target "" (\0)
          00 00 00 00 00 00 00 00             target_time = 0 (i64)
          9a 99 19 3f                         gain = 0.6 (f32 LE)
+         00 00 00 00                         pan  = 0.0 (f32 LE, centre)
 ```
 
-43 bytes total → UDP to `255.255.255.255:7700`. That single packet makes the
+47 bytes total → UDP to `255.255.255.255:7700`. That single packet makes the
 device play its `sample-kit.sine_100hz` clip — deploy the `sample-kit` in Hapbeat
 Studio (it appears automatically when you pick a Kit folder).
 

@@ -193,9 +193,10 @@ bool Hapbeat::discover(uint32_t timeoutMs) {
   return deviceCount() > 0;
 }
 
-void Hapbeat::play(const char* eventId, float gain, const char* target) {
+void Hapbeat::play(const char* eventId, float gain, const char* target, float pan) {
   uint8_t buf[256];
-  sendRouted(buf, hapbeat::buildPlay(buf, sizeof(buf), nextSeq(), eventId, target, 0, gain));
+  sendRouted(buf,
+             hapbeat::buildPlay(buf, sizeof(buf), nextSeq(), eventId, target, 0, gain, pan));
 }
 
 void Hapbeat::stop(const char* eventId, const char* target) {
