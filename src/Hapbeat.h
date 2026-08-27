@@ -77,6 +77,12 @@ class Hapbeat {
   using PlaybackStatus = HapbeatPlaybackStatus;
   using DeferredReason = HapbeatDeferredReason;
 
+  Hapbeat() = default;
+  Hapbeat(const Hapbeat&) = delete;
+  Hapbeat& operator=(const Hapbeat&) = delete;
+  Hapbeat(Hapbeat&&) = delete;
+  Hapbeat& operator=(Hapbeat&&) = delete;
+
   // Open the UDP socket for sending. appName (<=16 chars) shows on the device
   // OLED while connected. Call after Wi-Fi is connected.
   bool begin(uint16_t port = 7700, const char* appName = "");

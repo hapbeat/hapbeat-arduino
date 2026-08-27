@@ -27,6 +27,14 @@ static_assert(std::is_move_constructible<Hapbeat::Playback>::value,
               "Playback must be move-constructible");
 static_assert(std::is_move_assignable<Hapbeat::Playback>::value,
               "Playback must be move-assignable");
+static_assert(!std::is_copy_constructible<Hapbeat>::value,
+              "Hapbeat must not be copy-constructible");
+static_assert(!std::is_copy_assignable<Hapbeat>::value,
+              "Hapbeat must not be copy-assignable");
+static_assert(!std::is_move_constructible<Hapbeat>::value,
+              "Hapbeat must not be move-constructible");
+static_assert(!std::is_move_assignable<Hapbeat>::value,
+              "Hapbeat must not be move-assignable");
 
 static std::vector<uint8_t> pong(const char* address) {
   std::vector<uint8_t> packet(8 + 16, 0);
