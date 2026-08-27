@@ -7,6 +7,7 @@
 namespace {
 
 constexpr size_t kPongBufferSize = 256;
+constexpr float kPhaseToRadians = 6.28318530717958647692f / 4294967296.0f;
 
 bool readCString(const uint8_t* data, size_t end, size_t& pos, char* out,
                  size_t capacity) {
@@ -46,41 +47,46 @@ bool parsePongAddress(const uint8_t* packet, size_t packetLength, char* address,
 }  // namespace
 
 void HapbeatPlayback::reset(Hapbeat* hub, uint8_t slot, uint16_t id,
-                            float gain, float pan, bool loop) {
+                            uint64_t generation, float gain, float pan,
+                            bool loop) {
   _hub = hub;
   _slot = slot;
   _id = id;
-  _status = HapbeatPlaybackStatus::Deferred;
-  _reason = HapbeatDeferredReason::NoResolvedEndpoint;
+  _generation = generation;
+  _allocated = true;
   _gain = gain;
   _pan = pan;
   _loop = loop;
 }
 
-void HapbeatPlayback::setState(HapbeatPlaybackStatus state,
-                               HapbeatDeferredReason reason) {
-  _status = state;
-  _reason = reason;
+HapbeatPlaybackStatus HapbeatPlayback::status() const {
+  if (!_hub || !_generation) return HapbeatPlaybackStatus::Stopped;
+  return _hub->playbackStatus(_slot, _id, _generation);
+}
+
+HapbeatDeferredReason HapbeatPlayback::deferredReason() const {
+  if (!_hub || !_generation) return HapbeatDeferredReason::None;
+  return _hub->playbackReason(_slot, _id, _generation);
 }
 
 void HapbeatPlayback::setGain(float value) {
   _gain = Hapbeat::clampFloat(value, 0.0f, 1.0f);
-  if (_hub) _hub->setSourceGain(_slot, _id, _gain);
+  if (_hub) _hub->setSourceGain(_slot, _id, _generation, _gain);
 }
 
 void HapbeatPlayback::setPan(float value) {
   _pan = Hapbeat::clampFloat(value, -1.0f, 1.0f);
-  if (_hub) _hub->setSourcePan(_slot, _id, _pan);
+  if (_hub) _hub->setSourcePan(_slot, _id, _generation, _pan);
 }
 
 void HapbeatPlayback::setLoop(bool value) {
   _loop = value;
-  if (_hub) _hub->setSourceLoop(_slot, _id, _loop);
+  if (_hub) _hub->setSourceLoop(_slot, _id, _generation, _loop);
 }
 
 void HapbeatPlayback::stop() {
-  if (!_hub || _status == HapbeatPlaybackStatus::Stopped) return;
-  _hub->stopSource(_slot, _id);
+  if (!_hub || status() == HapbeatPlaybackStatus::Stopped) return;
+  _hub->stopSource(_slot, _id, _generation);
 }
 
 bool Hapbeat::begin(uint16_t port, const char* appName) {
@@ -173,8 +179,9 @@ void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
   int8_t oldest = -1;
   uint32_t oldestAge = 0;
 
-  // Keep a route/address migration in the same table entry where it can be
-  // matched by the stream reconciler without creating a second session.
+  // The exact (IP, port, full address) tuple is the endpoint identity. A full
+  // address may legitimately be reported by multiple IP routes, so address
+  // alone must never select or overwrite an existing table entry.
   if (hasAddress) {
     for (uint8_t i = 0; i < MAX_DEVICES; ++i) {
       KnownDevice& device = _devices[i];
@@ -183,15 +190,6 @@ void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
           strcmp(device.address, address) == 0) {
         slot = i;
         break;
-      }
-    }
-    if (slot < 0) {
-      for (uint8_t i = 0; i < MAX_DEVICES; ++i) {
-        KnownDevice& device = _devices[i];
-        if (device.used && strcmp(device.address, address) == 0) {
-          slot = i;  // same address, new route
-          break;
-        }
       }
     }
     if (slot < 0) {
@@ -383,6 +381,15 @@ HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
   }
   if (slot == MAX_STREAM_SOURCES) return nullptr;
 
+  uint8_t handleSlot = MAX_PLAYBACK_HANDLES;
+  for (uint8_t i = 0; i < MAX_PLAYBACK_HANDLES; ++i) {
+    if (!_playbacks[i]._allocated) {
+      handleSlot = i;
+      break;
+    }
+  }
+  if (handleSlot == MAX_PLAYBACK_HANDLES) return nullptr;
+
   SineSource& source = _sources[slot];
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
     _sessions[s].attached[slot] = false;
@@ -391,7 +398,13 @@ HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
   }
   source.used = true;
   source.id = nextPlaybackId();
-  source.dphase = 2.0f * (float)PI * freqHz / (float)STREAM_SAMPLE_RATE;
+  const double scaledStep = (double)freqHz * 4294967296.0 /
+                            (double)STREAM_SAMPLE_RATE;
+  const int64_t roundedStep = scaledStep >= 0.0
+                                  ? (int64_t)(scaledStep + 0.5)
+                                  : (int64_t)(scaledStep - 0.5);
+  source.generation = nextPlaybackGeneration();
+  source.phaseStep = (uint32_t)roundedStep;
   source.amplitude = (int16_t)(0.8f * 32767.0f);
   if (durationMs == 0) {
     source.totalFrames = 0;  // open-ended source
@@ -400,16 +413,20 @@ HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
     source.totalFrames = frames == 0 ? 1 : (uint32_t)frames;
   }
   memcpy(source.target, targetValue, targetLength + 1);
-  const float sourceGain = clampFloat(intensity, 0.0f, 1.0f);
-  const float sourcePan = clampFloat(pan, -1.0f, 1.0f);
-  source.playback.reset(this, slot, source.id, sourceGain, sourcePan, loop);
+  source.gain = clampFloat(intensity, 0.0f, 1.0f);
+  source.pan = clampFloat(pan, -1.0f, 1.0f);
+  source.loop = loop;
+  source.status = HapbeatPlaybackStatus::Deferred;
+  source.reason = HapbeatDeferredReason::NoResolvedEndpoint;
   reconcileStreams(millis());
-  return &source.playback;
+  _playbacks[handleSlot].reset(this, slot, source.id, source.generation,
+                               source.gain, source.pan, source.loop);
+  return &_playbacks[handleSlot];
 }
 
 void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs,
                        const char* target) {
-  HapbeatPlayback* playback =
+  Playback* playback =
       playSineSource(freqHz, intensity, durationMs, target, 0.0f, false);
   if (!playback) return;
   const uint32_t start = millis();
@@ -419,6 +436,11 @@ void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs,
   }
   playback->stop();
   tick();
+  // This internal convenience call does not expose its handle. Reclaim its
+  // registry entry so repeated blocking plays do not consume the fixed handle
+  // registry; externally returned handles remain generation-stable forever.
+  playback->_allocated = false;
+  playback->_hub = nullptr;
 }
 
 void Hapbeat::tick() {
@@ -496,8 +518,7 @@ bool Hapbeat::endpointCoolingDown(const StreamEndpoint& endpoint,
   for (uint8_t i = 0; i < MAX_END_RECORDS; ++i) {
     const EndRecord& record = _endRecords[i];
     if (!record.used) continue;
-    if ((record.endpoint.ip == endpoint.ip && record.endpoint.port == endpoint.port) ||
-        strcmp(record.endpoint.address, endpoint.address) == 0) {
+    if (sameEndpoint(record.endpoint, endpoint)) {
       if (now - record.endedMs < SESSION_LINGER_MS) return true;
     }
   }
@@ -536,6 +557,14 @@ void Hapbeat::removeSession(uint8_t slot) {
   _sessions[slot] = StreamSession();
 }
 
+bool Hapbeat::sendStreamBegin(StreamSession& session) {
+  uint8_t packet[128];
+  const size_t length = hapbeat::buildStreamBegin(
+      packet, sizeof(packet), nextSeq(), STREAM_SAMPLE_RATE, STREAM_CHANNELS,
+      hapbeat::FORMAT_PCM16, 0, 1.0f, session.endpoint.address);
+  return length != 0 && sendStreamTo(packet, length, session.endpoint);
+}
+
 bool Hapbeat::sourceCompletedEverywhere(
     uint8_t sourceSlot, const StreamEndpoint* endpoints,
     uint8_t endpointCount) const {
@@ -554,10 +583,10 @@ void Hapbeat::completeFinishedSources(const StreamEndpoint* endpoints,
                                       uint8_t endpointCount) {
   for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
     SineSource& source = _sources[i];
-    if (!source.used || source.totalFrames == 0 || source.playback._loop) continue;
+    if (!source.used || source.totalFrames == 0 || source.loop) continue;
     if (!sourceCompletedEverywhere(i, endpoints, endpointCount)) continue;
-    source.playback.setState(HapbeatPlaybackStatus::Stopped,
-                             HapbeatDeferredReason::None);
+    source.status = HapbeatPlaybackStatus::Stopped;
+    source.reason = HapbeatDeferredReason::None;
     source.used = false;
   }
 }
@@ -586,14 +615,26 @@ void Hapbeat::reconcileStreams(uint32_t now) {
       continue;
     }
 
+    // A same-IP/port route is the unambiguous migration seam. Only when that
+    // seam is absent may the full address be considered, and only if that
+    // address maps to one endpoint. This keeps same-address multi-route
+    // devices as separate sessions.
     int8_t candidate = -1;
     uint8_t candidateCount = 0;
     for (uint8_t e = 0; e < endpointCount; ++e) {
       if (claimed[e]) continue;
-      if (strcmp(session.endpoint.address, endpoints[e].address) == 0 ||
-          sameIpPort(session.endpoint, endpoints[e])) {
+      if (sameIpPort(session.endpoint, endpoints[e])) {
         candidate = e;
         ++candidateCount;
+      }
+    }
+    if (candidateCount == 0) {
+      for (uint8_t e = 0; e < endpointCount; ++e) {
+        if (claimed[e]) continue;
+        if (strcmp(session.endpoint.address, endpoints[e].address) == 0) {
+          candidate = e;
+          ++candidateCount;
+        }
       }
     }
     if (candidateCount == 1) {
@@ -604,6 +645,14 @@ void Hapbeat::reconcileStreams(uint32_t now) {
       // is a new session and finite sources begin at frame zero.
       removeSession(s);
     }
+  }
+
+  // BEGIN is an exact-unicast handshake. A failed TX must leave the session
+  // deferred and retry on the next cooperative tick before any DATA is sent.
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    StreamSession& session = _sessions[s];
+    if (session.used && !session.empty && !session.beginSent)
+      session.beginSent = sendStreamBegin(session);
   }
 
   // Remove stale source memberships while preserving an empty session during
@@ -646,14 +695,9 @@ void Hapbeat::reconcileStreams(uint32_t now) {
             _sessions[s].used = true;
             _sessions[s].endpoint = endpoints[e];
             _sessions[s].startedMs = now;
-            uint8_t packet[128];
-            const size_t length = hapbeat::buildStreamBegin(
-                packet, sizeof(packet), nextSeq(), STREAM_SAMPLE_RATE,
-                STREAM_CHANNELS, hapbeat::FORMAT_PCM16, 0, 1.0f,
-                _sessions[s].endpoint.address);
             // No fallback is allowed. The session remains endpoint-scoped even
             // if this individual unicast attempt is rejected by the TX queue.
-            sendStreamTo(packet, length, _sessions[s].endpoint);
+            _sessions[s].beginSent = sendStreamBegin(_sessions[s]);
             break;
           }
         }
@@ -663,20 +707,24 @@ void Hapbeat::reconcileStreams(uint32_t now) {
       if (session.completed[i]) continue;
       if (!session.attached[i]) {
         if (session.empty) {
-          session.startedMs = now -
-                              (uint32_t)(((uint64_t)session.framesSent * 1000) /
-                                         STREAM_SAMPLE_RATE);
+          const uint64_t bufferedFrames =
+              session.framesSent > STREAM_SEND_AHEAD_FRAMES
+                  ? session.framesSent - STREAM_SEND_AHEAD_FRAMES
+                  : 0;
+          const uint64_t baselineMs =
+              (bufferedFrames * 1000) / STREAM_SAMPLE_RATE;
+          session.startedMs = now - (uint32_t)baselineMs;
         }
         session.cursors[i] = 0;  // every new endpoint starts the source at zero
         session.attached[i] = true;
         session.empty = false;
       }
-      assigned = true;
+      assigned = assigned || session.beginSent;
     }
-    source.playback.setState(
-        assigned ? HapbeatPlaybackStatus::Active : HapbeatPlaybackStatus::Deferred,
-        assigned ? HapbeatDeferredReason::None
-                 : HapbeatDeferredReason::NoResolvedEndpoint);
+    source.status = assigned ? HapbeatPlaybackStatus::Active
+                             : HapbeatPlaybackStatus::Deferred;
+    source.reason = assigned ? HapbeatDeferredReason::None
+                             : HapbeatDeferredReason::NoResolvedEndpoint;
   }
 }
 
@@ -691,27 +739,32 @@ void Hapbeat::mixSession(StreamSession& session, uint16_t frames,
     if (!session.attached[sourceSlot] || !_sources[sourceSlot].used) continue;
     SineSource& source = _sources[sourceSlot];
     uint32_t cursor = session.cursors[sourceSlot];
-    const float pan = source.playback._pan;
-    const float gain = source.playback._gain;
+    const float pan = source.pan;
+    const float gain = source.gain;
     const float leftGain = gain * (pan <= 0.0f ? 1.0f : 1.0f - pan);
     const float rightGain = gain * (pan >= 0.0f ? 1.0f : 1.0f + pan);
     for (uint16_t frame = 0; frame < frames; ++frame) {
       if (source.totalFrames != 0 && cursor >= source.totalFrames) {
-        if (source.playback._loop) {
+        if (source.loop) {
           cursor = 0;
         } else {
           finishedMask |= (uint8_t)(1u << sourceSlot);
           break;
         }
       }
-      const float phase = fmodf(source.dphase * (float)cursor, 2.0f * (float)PI);
-      const float sample = (float)source.amplitude * sinf(phase);
+      // The cursor is a modulo-2^32 phase index. Integer multiplication keeps
+      // phase exact across long-lived sources and its defined wrap is a full
+      // phase wrap, unlike multiplying a large cursor by a float.
+      const uint32_t phase =
+          (uint32_t)((uint64_t)source.phaseStep * (uint64_t)cursor);
+      const float sample = (float)source.amplitude *
+                           sinf((float)phase * kPhaseToRadians);
       left[frame] += sample * leftGain;
       right[frame] += sample * rightGain;
       ++cursor;
     }
     session.cursors[sourceSlot] = cursor;
-    if (source.totalFrames != 0 && !source.playback._loop &&
+    if (source.totalFrames != 0 && !source.loop &&
         cursor >= source.totalFrames)
       finishedMask |= (uint8_t)(1u << sourceSlot);
   }
@@ -738,6 +791,20 @@ void Hapbeat::pumpStreams(uint32_t now) {
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
     StreamSession& session = _sessions[s];
     if (!session.used) continue;
+    if (!session.beginSent) {
+      bool hasAttached = false;
+      for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
+        if (session.attached[i]) hasAttached = true;
+      if (!hasAttached) {
+        if (!session.empty) {
+          session.empty = true;
+          session.emptySinceMs = now;
+        } else if (now - session.emptySinceMs >= SESSION_LINGER_MS) {
+          removeSession(s);
+        }
+      }
+      continue;
+    }
 
     bool hasAttached = false;
     uint16_t maximum = 0;
@@ -745,7 +812,7 @@ void Hapbeat::pumpStreams(uint32_t now) {
       if (!session.attached[i]) continue;
       hasAttached = true;
       const SineSource& source = _sources[i];
-      if (source.totalFrames == 0 || source.playback._loop) {
+      if (source.totalFrames == 0 || source.loop) {
         maximum = STREAM_CHUNK_FRAMES;
         break;
       }
@@ -757,8 +824,8 @@ void Hapbeat::pumpStreams(uint32_t now) {
       }
     }
     const uint32_t elapsedMs = now - session.startedMs;
-    const uint32_t wanted =
-        (uint32_t)(((uint64_t)elapsedMs * STREAM_SAMPLE_RATE) / 1000) +
+    const uint64_t wanted =
+        ((uint64_t)elapsedMs * STREAM_SAMPLE_RATE) / 1000 +
         STREAM_SEND_AHEAD_FRAMES;
     for (uint8_t chunk = 0; hasAttached && chunk < MAX_CHUNKS_PER_TICK &&
                              session.framesSent < wanted;
@@ -767,7 +834,7 @@ void Hapbeat::pumpStreams(uint32_t now) {
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
         if (!session.attached[i]) continue;
         const SineSource& source = _sources[i];
-        if (source.totalFrames == 0 || source.playback._loop) {
+        if (source.totalFrames == 0 || source.loop) {
           maximum = STREAM_CHUNK_FRAMES;
           break;
         }
@@ -826,12 +893,12 @@ void Hapbeat::pumpStreams(uint32_t now) {
   completeFinishedSources(endpoints, endpointCount);
 }
 
-void Hapbeat::stopSource(uint8_t slot, uint16_t id) {
+void Hapbeat::stopSource(uint8_t slot, uint16_t id, uint64_t generation) {
   if (slot >= MAX_STREAM_SOURCES) return;
   SineSource& source = _sources[slot];
-  if (!source.used || source.id != id) return;
-  source.playback.setState(HapbeatPlaybackStatus::Stopped,
-                           HapbeatDeferredReason::None);
+  if (!source.used || source.id != id || source.generation != generation) return;
+  source.status = HapbeatPlaybackStatus::Stopped;
+  source.reason = HapbeatDeferredReason::None;
   source.used = false;
   const uint32_t now = millis();
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
@@ -845,20 +912,26 @@ void Hapbeat::stopSource(uint8_t slot, uint16_t id) {
   }
 }
 
-void Hapbeat::setSourceGain(uint8_t slot, uint16_t id, float value) {
-  if (slot < MAX_STREAM_SOURCES && _sources[slot].used && _sources[slot].id == id)
-    _sources[slot].playback._gain = clampFloat(value, 0.0f, 1.0f);
+void Hapbeat::setSourceGain(uint8_t slot, uint16_t id, uint64_t generation,
+                            float value) {
+  if (slot < MAX_STREAM_SOURCES && _sources[slot].used &&
+      _sources[slot].id == id && _sources[slot].generation == generation)
+    _sources[slot].gain = clampFloat(value, 0.0f, 1.0f);
 }
 
-void Hapbeat::setSourcePan(uint8_t slot, uint16_t id, float value) {
-  if (slot < MAX_STREAM_SOURCES && _sources[slot].used && _sources[slot].id == id)
-    _sources[slot].playback._pan = clampFloat(value, -1.0f, 1.0f);
+void Hapbeat::setSourcePan(uint8_t slot, uint16_t id, uint64_t generation,
+                           float value) {
+  if (slot < MAX_STREAM_SOURCES && _sources[slot].used &&
+      _sources[slot].id == id && _sources[slot].generation == generation)
+    _sources[slot].pan = clampFloat(value, -1.0f, 1.0f);
 }
 
-void Hapbeat::setSourceLoop(uint8_t slot, uint16_t id, bool value) {
-  if (slot >= MAX_STREAM_SOURCES || !_sources[slot].used || _sources[slot].id != id)
+void Hapbeat::setSourceLoop(uint8_t slot, uint16_t id, uint64_t generation,
+                            bool value) {
+  if (slot >= MAX_STREAM_SOURCES || !_sources[slot].used ||
+      _sources[slot].id != id || _sources[slot].generation != generation)
     return;
-  _sources[slot].playback._loop = value;
+  _sources[slot].loop = value;
   if (value) {
     for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s)
       _sessions[s].completed[slot] = false;
@@ -866,11 +939,27 @@ void Hapbeat::setSourceLoop(uint8_t slot, uint16_t id, bool value) {
   }
 }
 
+HapbeatPlaybackStatus Hapbeat::playbackStatus(uint8_t slot, uint16_t id,
+                                               uint64_t generation) const {
+  if (slot >= MAX_STREAM_SOURCES || !_sources[slot].used ||
+      _sources[slot].id != id || _sources[slot].generation != generation)
+    return HapbeatPlaybackStatus::Stopped;
+  return _sources[slot].status;
+}
+
+HapbeatDeferredReason Hapbeat::playbackReason(uint8_t slot, uint16_t id,
+                                              uint64_t generation) const {
+  if (slot >= MAX_STREAM_SOURCES || !_sources[slot].used ||
+      _sources[slot].id != id || _sources[slot].generation != generation)
+    return HapbeatDeferredReason::None;
+  return _sources[slot].reason;
+}
+
 void Hapbeat::clearAllSources(bool sendEnds) {
   for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
     if (!_sources[i].used) continue;
-    _sources[i].playback.setState(HapbeatPlaybackStatus::Stopped,
-                                  HapbeatDeferredReason::None);
+    _sources[i].status = HapbeatPlaybackStatus::Stopped;
+    _sources[i].reason = HapbeatDeferredReason::None;
     _sources[i].used = false;
   }
   const uint32_t now = millis();
@@ -879,12 +968,14 @@ void Hapbeat::clearAllSources(bool sendEnds) {
     if (!session.used) continue;
     for (uint8_t source = 0; source < MAX_STREAM_SOURCES; ++source)
       session.attached[source] = false;
-    if (sendEnds) {
+    if (sendEnds && session.beginSent) {
       uint8_t packet[hapbeat::HEADER_SIZE];
       const size_t length =
           hapbeat::buildStreamEnd(packet, sizeof(packet), nextSeq());
       sendStreamTo(packet, length, session.endpoint);
       recordEnd(session.endpoint, now);
+      removeSession(i);
+    } else if (sendEnds) {
       removeSession(i);
     } else if (!session.empty) {
       session.empty = true;

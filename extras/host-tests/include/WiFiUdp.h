@@ -21,6 +21,7 @@ class WiFiUDP {
 
   static std::vector<Sent> sent;
   static std::deque<Inbound> inbound;
+  static int failEndPackets;
 
   bool begin(uint16_t) { return true; }
   int parsePacket() {
@@ -53,12 +54,17 @@ class WiFiUDP {
   }
   int endPacket() {
     sent.push_back({_txIp, _txPort, _tx});
+    if (failEndPackets > 0) {
+      --failEndPackets;
+      return 0;
+    }
     return 1;
   }
 
   static void clear() {
     sent.clear();
     inbound.clear();
+    failEndPackets = 0;
   }
   static void inject(IPAddress ip, uint16_t port, const std::vector<uint8_t>& data) {
     inbound.push_back({ip, port, data});
