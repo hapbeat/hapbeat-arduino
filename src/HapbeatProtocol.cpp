@@ -65,6 +65,34 @@ size_t finish(Writer& w, size_t sizeCap) {
 
 namespace hapbeat {
 
+bool addressMatches(const char* target, const char* address) {
+  if (!target || !target[0]) return true;
+  if (!address || !address[0]) return false;
+
+  const char* targetPart = target;
+  const char* addressPart = address;
+  while (true) {
+    const char* targetEnd = targetPart;
+    while (*targetEnd && *targetEnd != '/') ++targetEnd;
+    const char* addressEnd = addressPart;
+    while (*addressEnd && *addressEnd != '/') ++addressEnd;
+
+    if (addressPart == addressEnd) return false;
+    const size_t targetLen = (size_t)(targetEnd - targetPart);
+    const size_t addressLen = (size_t)(addressEnd - addressPart);
+    const bool wildcard = targetLen == 1 && targetPart[0] == '*';
+    if (!wildcard &&
+        (targetLen != addressLen || memcmp(targetPart, addressPart, targetLen) != 0)) {
+      return false;
+    }
+
+    if (!*targetEnd) return true;
+    if (!*addressEnd) return false;
+    targetPart = targetEnd + 1;
+    addressPart = addressEnd + 1;
+  }
+}
+
 size_t buildPlay(uint8_t* out, size_t cap, uint16_t seq, const char* eventId,
                  const char* target, int64_t targetTimeUs, float gain, float pan) {
   if (pan < -1.0f) pan = -1.0f;

@@ -22,6 +22,7 @@ constexpr size_t HEADER_SIZE = 8;
 constexpr size_t MAX_PACKET_SIZE = 512;          // command packets
 constexpr size_t MAX_STREAM_PACKET_SIZE = 1472;  // 1500 MTU - 20 IP - 8 UDP
 constexpr size_t MAX_APP_NAME_LEN = 16;          // device OLED grid width
+constexpr size_t MAX_DEVICE_ADDRESS_LEN = 64;    // including no null terminator
 
 constexpr uint8_t CMD_PLAY = 0x01;
 constexpr uint8_t CMD_STOP = 0x02;
@@ -38,6 +39,11 @@ constexpr uint8_t CMD_ERROR = 0xff;
 
 constexpr uint8_t FORMAT_PCM16 = 0;
 constexpr uint8_t FORMAT_IMA_ADPCM = 1;
+
+// Positional target matching from device-addressing.md. `*` matches one whole
+// segment; a target with fewer segments is a prefix match. This helper is
+// allocation-free so transports can use it on embedded targets.
+bool addressMatches(const char* target, const char* address);
 
 // Each builder writes one complete packet into `out` (capacity `cap`) and
 // returns the number of bytes written, or 0 if it would not fit or exceeds the

@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- `playSineSource(...)` と `tick()` を追加し、固定容量の source / endpoint session
+  hub で複数サイン波を同時に扱えるようにしました。各 PONG の完全アドレスへ
+  16 kHz stereo PCM16 を exact unicast し、未解決時は `Deferred`、空 session は
+  310 ms linger、`STREAM_END` 後は 310 ms cooldown になります。旧 single sine API
+  (`beginSine` / `pumpSine` / `endSine` / `sineActive`) は削除しました。
 - `play()` に `pan` 引数（左右バランス。-1 = 左のみ / 0 = 中央 / +1 = 右のみ、既定 0）を追加し、PLAY パケット末尾に float32 として常に送るようにしました（contracts DEC-055）。
 
 ## 0.2.0 — 複数デバイス追跡とコマンドのユニキャスト化

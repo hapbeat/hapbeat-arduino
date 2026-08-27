@@ -6,6 +6,7 @@
 # Datatypes (KEYWORD1)
 #######################################
 Hapbeat	KEYWORD1
+HapbeatPlayback	KEYWORD1
 
 #######################################
 # Methods and Functions (KEYWORD2)
@@ -16,5 +17,7 @@ stop	KEYWORD2
 stopAll	KEYWORD2
 ping	KEYWORD2
 playSine	KEYWORD2
+playSineSource	KEYWORD2
+tick	KEYWORD2
 end	KEYWORD2
 setGroup	KEYWORD2

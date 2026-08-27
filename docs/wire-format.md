@@ -5,12 +5,9 @@ from any language/MCU even without this library. Full spec:
 `hapbeat-contracts/specs/message-format.md`.
 
 - Transport: **UDP** to **port 7700**, on the same Wi-Fi/LAN as the device.
-  Send to a device's own IP once you know it (PONG); the **broadcast address**
-  `255.255.255.255` works too and is the fallback before discovery. Either way
-  devices self-filter by address, so the packet bytes are identical. Prefer
-  unicast: APs hold broadcast frames until their next DTIM beacon (100–300 ms)
-  whenever any client on the AP is power-saving, and broadcast gets no MAC
-  ACK/retry.
+  Commands may use the **broadcast address** `255.255.255.255` before discovery,
+  but stream packets must use the exact `(IP, UDP port, full PONG address)`
+  endpoint. A pinned IP without that address is not a stream endpoint.
 - **All multi-byte fields are little-endian.**
 
 ## Header (8 bytes, every packet)
@@ -63,16 +60,20 @@ Payload: `connected` (u8 1/0) + `group` (u8) + `app_name`\0 + `device_name`\0.
 For synthesized haptics (e.g. a sine of a chosen frequency/intensity). The
 device mixes streamed PCM alongside clips into a ~256 ms ring buffer.
 
-1. **STREAM_BEGIN (0x30)** — `sample_rate` (u16, use `16000`) + `channels`
-   (u8, `1`) + `format` (u8, `0` = PCM16) + `total_samples` (u32) + `gain`
-   (f32, 0..1) [+ optional `target`\0]. **Send this first** — the device only
-   accepts STREAM_DATA after a matching BEGIN.
+1. **STREAM_BEGIN (0x30)** — `sample_rate` (u16, exactly `16000`) + `channels`
+   (u8, exactly `2`) + `format` (u8, `0` = PCM16) + `total_samples` (u32,
+   exactly `0`) + `gain` (f32, exactly `1.0`) + the full PONG device address
+   (`target`\0). **Send this first** — the device only accepts STREAM_DATA after
+   a matching BEGIN. Each exact endpoint has its own session.
 2. **STREAM_DATA (0x31)** — `offset` (u32, running byte offset) + raw
    little-endian PCM16 samples. Keep each packet ≤ 1472 bytes and feed at
    ~real-time (16000 samples/sec) so the 256 ms ring neither overflows nor
    underruns.
 3. **STREAM_END (0x32)** — no payload. The buffer drains naturally.
 
-This library's `playSine(freqHz, intensity, durationMs)` does exactly this:
-PCM16 mono @ 16 kHz, `intensity` carried in the BEGIN `gain` field, paced to
-real-time.
+This library's `playSineSource(freqHz, intensity, durationMs, target, pan, loop)`
+generates a source on the MCU, applies source gain and linear pan, then mixes
+all matching sources into endpoint-scoped PCM16 stereo @ 16 kHz. The BEGIN gain
+is always `1.0`; source intensity is applied in the mixed samples. `tick()` is
+cooperative and bounded, and sends no stream packet until a full endpoint is
+resolved.

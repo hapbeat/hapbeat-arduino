@@ -10,9 +10,10 @@ Two ways to make haptics, no stored audio required:
 
 - **Command (fire) mode** — trigger a clip that lives in the kit on the device
   (`hb.play("sample-kit.sine_100hz")`). The MCU stores nothing; it just sends a ~30-byte trigger.
-- **Synthesized sine streaming** — generate a sine on the MCU and stream it
-  (`hb.playSine(freqHz, intensity, durationMs)`). Frequency and intensity are
-  live parameters — expressive without any WAV files.
+- **Synthesized sine streaming** — register one or more sine sources on the MCU
+  (`hb.playSineSource(...)`) and service them with `hb.tick()`. Frequency,
+  intensity, pan, and duration are live parameters — expressive without WAV
+  files.
 
 This is the **level-1** library (initial draft). Verify on your own ESP32 before
 relying on it; ESP-NOW transport and richer synthesis are future work.
@@ -60,7 +61,7 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 |---|---|
 | `M5Stack_Command` | A/B → fire kit events, C → stop. Unicasts to discovered devices; the screen shows the button map and what it is sending to |
 | `M5Stack_SineStream` | A 200 Hz / B 100 Hz for a fixed time, C 100 Hz while held. No kit needed |
-| `Verify_Unicast` | continuous 100 Hz sine, auto-alternating broadcast ⇄ unicast every 5 s (release check — no display library needed) |
+| `Verify_Unicast` | continuous 100 Hz sine with command broadcast/unicast toggling; stream packets remain exact-unicast (release check — no display library needed) |
 
 (Single-button boards like M5 ATOM only have `BtnA` — use that one.)
 
@@ -71,18 +72,21 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 | `begin(port = 7700, appName = "")` | open the UDP socket; announce app name |
 | `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event (gain 0..1; `pan` is the left/right balance, -1 = left only … 0 = centre … +1 = right only) |
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
-| `playSine(freqHz, intensity, durationMs, target = "")` | stream a synthesized sine |
+| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return its `Playback` handle |
+| `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
+| `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
 | `ping()` / `end()` | keep-alive probe / announce disconnect |
 | `discover(timeoutMs = 1500)` | broadcast a PING and collect every reply |
 | `poll()` / `deviceCount()` / `deviceIp()` | device table upkeep and inspection |
-| `setDeviceIp(ip)` / `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | routing controls |
+| `setDeviceIp(ip)` / `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | command routing controls; streams still require a full PONG endpoint |
 
 ### Addressing
 
-`target`: `""` = every device. Matching is **positional** — segment *i* of the
-target is compared with segment *i* of the device address, `*` stands for one
-**whole** segment (`pos_*` is compared literally, so use `player_1/*`), and a
-short target front-matches.
+`target`: `""` = every resolved endpoint for streams (and every device for
+commands). Matching is **positional** — segment *i* of the target is compared
+with segment *i* of the device address, `*` stands for one whole **segment**
+(`pos_*` is compared literally, so use `player_1/*`), and a short target
+front-matches.
 
 Device addresses are always `player_<N>/<position>/group_<M>`, defaulting to
 `player_1` / `group_1`. So `"player_1/pos_neck"` and `"*/pos_neck"` work as you
@@ -95,12 +99,12 @@ never matches.
 The MCU and the Hapbeat must be on the same Wi-Fi/LAN (or the Hapbeat acting as
 a SoftAP that the MCU joins). The library sends on UDP port 7700.
 
-Commands and streams are **unicast** to every device that has answered a PING,
-and broadcast only while no device is known. Wi-Fi APs hold broadcast frames
-until their next DTIM beacon (100–300 ms) whenever any client on the AP is
-power-saving — that shows up as a late buzz and as stuttering streams — and
-broadcast frames are also unacked and sent at the lowest rate. Unicast avoids
-both.
+Commands are unicast to every device that has answered a PING, with broadcast
+fallback while no command destination is known. Stream packets are different:
+they are never broadcast, including when `setBroadcastOnly(true)` is enabled or
+only a pinned IP is configured. A stream session starts only after a full PONG
+address resolves an exact `(IP, UDP port, address)` endpoint. This avoids AP
+DTIM buffering and keeps multiple sources isolated per endpoint.
 
 ```cpp
 hb.begin(7700, "MyDevice");
@@ -110,9 +114,14 @@ hb.ping();                // keeps the device table (and therefore unicast) aliv
 ```
 
 Devices drop out of the table after `setDeviceTimeout()` (15 s default) without
-a PONG, at which point sends fall back to broadcast. Call `setBroadcastOnly(true)`
-to always broadcast — worth it when many devices must fire in lockstep, since
-one broadcast reaches them all at once while N unicasts go out one after another.
+a PONG. Commands then fall back to broadcast; stream handles become
+`Deferred(NoResolvedEndpoint)` until a full endpoint is available. Call
+`setBroadcastOnly(true)` only when command packets should be broadcast.
+
+Each `playSineSource` handle has independent status, gain, pan, loop, and
+idempotent `stop()` control. The hub mixes all matching sources per exact
+endpoint as 16 kHz stereo PCM16, keeps a per-endpoint cursor, and uses a short
+empty-session linger/cooldown around `STREAM_END`.
 
 ## How it works at the byte level
 

@@ -3,7 +3,7 @@
 Single self-contained reference so an AI coding agent can use this library
 correctly from one file. Include name: `Hapbeat.h`. Repo: `hapbeat-arduino`.
 
-- last-verified-against: 0.1.0
+- last-verified-against: 0.2.0
 - Source of truth is the code: public API in `src/Hapbeat.h`, the wire format in
   `src/HapbeatProtocol.h` / `.cpp`. If this file disagrees with the code, the
   code wins.
@@ -26,9 +26,10 @@ streaming. Stored-WAV/clip streaming, an EventMap, and ESP-NOW transport are
 - **Command (fire) mode** — `hb.play("kit-name.clip-name")` sends a ~30-byte
   trigger; the haptic waveform lives in the **kit deployed to the device** via
   Hapbeat Studio. The MCU stores nothing. Needs a kit on the device.
-- **Synthesized sine** — `hb.playSine(freqHz, intensity, durationMs)` generates
-  a PCM16 sine on the MCU and streams it. Frequency + intensity are live
-  parameters. **No kit, no WAV, no Studio** — the fastest first success.
+- **Synthesized sine** — `hb.playSineSource(...)` registers one or more sine
+  sources on the MCU; `hb.tick()` mixes and streams them. Frequency, gain, pan,
+  loop, and duration are live parameters. **No kit, no WAV, no Studio** — the
+  fastest first success.
 
 Event id format is `<kit-name>.<file-name>` (e.g. `sample-kit.sine_100hz`); the
 id must exist in the kit deployed to the device.
@@ -68,20 +69,21 @@ void loop() {
 | Method | Purpose |
 |---|---|
 | `begin(port = 7700, appName = "")` | open the UDP socket; `appName` (≤16 chars) shows on the Hapbeat OLED while connected |
-| `play(eventId, gain = 1.0, target = "")` | fire a kit event (gain 0..1) |
+| `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event (gain 0..1; linear left/right balance) |
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
 | `ping()` | keep-alive / RTT probe |
 | `setGroup(group)` | group id sent in CONNECT_STATUS (level-1 default 0) |
 | `discover(timeoutMs = 1500)` | broadcast a PING and collect **every** PONG (blocks the full timeout); true if ≥1 replied |
 | `poll()` / `deviceCount()` / `deviceIp()` | drain pending PONGs (optional; sends do it too) / live device count / first device |
 | `setDeviceIp(ip)` | pin a device by IP (never expires); `0.0.0.0` clears pinned entries |
-| `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | liveness window (default 15 s) / force broadcast |
-| `playSine(freqHz, intensity, durationMs, target = "")` | one-shot synthesized sine (blocks ~durationMs) |
-| `beginSine(freqHz, intensity, target = "")` / `pumpSine()` / `endSine()` | continuous (open-ended) sine for hold-to-play / live control; call `pumpSine()` often from `loop()` |
-| `sineActive()` | is a continuous sine stream running |
+| `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | liveness window (default 15 s) / force command broadcast; streams still need a full PONG endpoint |
+| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return its `Playback` handle |
+| `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
+| `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
 | `end()` | tell the device this app is leaving (clears the OLED app name) |
 
-`target`: `""` = every device. Addresses are always
+`target`: `""` = every resolved stream endpoint (and every command device).
+Addresses are always
 `player_<N>/<position>/group_<M>` (defaults `player_1` / `group_1`) and matching
 is **positional** — segment *i* vs segment *i*, `*` covers one **whole**
 segment, a short target front-matches. So `"player_1/pos_neck"` and
@@ -91,19 +93,19 @@ segment, a short target front-matches. So `"player_1/pos_neck"` and
 
 ## How streaming works (so you don't reinvent it)
 
-- 16 kHz mono PCM16, generated on the MCU. One `STREAM_BEGIN`, continuous
-  `STREAM_DATA` (running offset), `STREAM_END` on stop.
+- Each full PONG `(IP, UDP port, address)` is an exact stream endpoint. Stream
+  packets are never broadcast; a pinned IP without a PONG address cannot start
+  a stream. Each endpoint has one session and its own cursor.
+- Sources are generated on the MCU and mixed per endpoint as 16 kHz stereo
+  PCM16 after source gain and linear pan. One canonical `STREAM_BEGIN` uses
+  16 kHz / stereo / PCM16 / total 0 / gain 1 and the full endpoint address.
 - The sender keeps ~160 ms of audio buffered ahead in the device's ~256 ms ring
-  (the lead buffer absorbs Wi-Fi jitter). `pumpSine()` self-paces and is bounded
-  per call — call it every `loop()` iteration; never block `loop()` > ~160 ms.
-- **Unicast by default**: commands and stream packets go to every device in the
-  table (populated by `discover()` / any PONG), and broadcast only while the
-  table is empty. Broadcast has no MAC ACK/retry (lossy → choppy) and is held
-  by the AP until its next DTIM beacon (100–300 ms) whenever any client is
-  power-saving. Call `ping()` every few seconds from `loop()` so devices don't
-  age out of the table (15 s default). `setBroadcastOnly(true)` reverts to
-  broadcast — better for firing many devices in lockstep, since N unicasts go
-  out one after another. Never both at once (a device would fire twice).
+  (the lead buffer absorbs Wi-Fi jitter). `tick()` self-paces and is bounded per
+  call — call it every `loop()` iteration; never block `loop()` > ~160 ms.
+- Commands may fall back to broadcast while no destination is known. Stream
+  handles become `Deferred(NoResolvedEndpoint)` until a full endpoint resolves;
+  `setBroadcastOnly(true)` never changes stream routing. Empty sessions linger
+  310 ms before `STREAM_END`, followed by a 310 ms cooldown before a new BEGIN.
 
 ## Wire format / interop
 

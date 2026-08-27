@@ -16,8 +16,8 @@
 
 #include "secrets.h"  // WIFI_SSID, WIFI_PASS, HAPBEAT_EVENT
 
-// Set to 1 to force the UDP-broadcast path (skip discovery) so you can A/B it
-// against unicast on the same hardware/network. 0 = discover + unicast (smoother).
+// Set to 1 to force command packets to broadcast. Streaming still requires a
+// full PONG endpoint, so discovery always runs and stream packets stay unicast.
 #ifndef FORCE_BROADCAST
 #define FORCE_BROADCAST 0
 #endif
@@ -64,7 +64,7 @@ void drawScreen() {
     if ((uint32_t)hb.deviceIp() != 0)
       M5.Display.printf("uni %s", hb.deviceIp().toString().c_str());
     else
-      M5.Display.print("broadcast (no dev)");
+      M5.Display.print("no endpoint");
     M5.Display.setTextColor(TFT_WHITE);
     M5.Display.setCursor(6, 36);
     M5.Display.printf("A=%s", HAPBEAT_EVENT);
@@ -83,6 +83,7 @@ void drawScreen() {
 }
 
 int g_holdBtn = -1;  // index of the button currently driving a hold stream (C)
+Hapbeat::Playback* g_holdPlayback = nullptr;
 
 // A / B: one-shot (fires once per tap; B blocks ~500 ms while streaming).
 void fireOneshot(int i) {
@@ -97,17 +98,19 @@ void fireOneshot(int i) {
   drawButton(i, false);
 }
 
-// C: hold-to-play — start a continuous sine on press, pump it while held.
+// C: hold-to-play — register a continuous sine on press, tick it while held.
 void startHold(int i) {
   if (g_holdBtn >= 0) return;
   g_holdBtn = i;
   drawButton(i, true);
-  if (g_wifi_ok) hb.beginSine(160.0f, 0.8f);
+  if (g_wifi_ok)
+    g_holdPlayback = hb.playSineSource(160.0f, 0.8f, 0, "", 0.0f, true);
 }
 
 void stopHold() {
   if (g_holdBtn < 0) return;
-  if (g_wifi_ok) hb.endSine();
+  if (g_wifi_ok && g_holdPlayback) g_holdPlayback->stop();
+  g_holdPlayback = nullptr;
   drawButton(g_holdBtn, false);
   g_holdBtn = -1;
 }
@@ -132,15 +135,13 @@ void setup() {
 
   if (g_wifi_ok) {
     hb.begin(7700, "M5Test");
-#if !FORCE_BROADCAST
-    // Find the Hapbeat -> unicast streaming (Wi-Fi MAC-ACK + retry = much
-    // smoother). Retry a few times: the device may not have answered the first
-    // broadcast PING yet. Falls back to broadcast if nothing replies.
+    hb.setBroadcastOnly(FORCE_BROADCAST);
+    // Find the Hapbeat endpoint required by streaming. Retry a few times: the
+    // device may not have answered the first broadcast PING yet.
     for (int i = 0; i < 3 && (uint32_t)hb.deviceIp() == 0; ++i) {
       hb.discover(800);
       if ((uint32_t)hb.deviceIp() == 0) delay(150);
     }
-#endif
   }
   drawScreen();
 }
@@ -170,6 +171,6 @@ void loop() {
   if (t.wasReleased() && g_holdBtn == 2) stopHold();
 #endif
 
-  // Keep the hold stream's ring topped up while a hold is active.
-  if (hb.sineActive()) hb.pumpSine();
+  // Service the hold source and all other endpoint-scoped streams.
+  if (g_wifi_ok) hb.tick();
 }

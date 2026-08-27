@@ -26,15 +26,16 @@ const float FREQ_C = 100.0f;   // same tone as B, so you can compare timed vs he
 const float INTENSITY = 0.6f;  // 0..1, sent as the stream gain
 const uint32_t TIMED_MS = 400; // how long A / B play
 
-// Devices drop out of the destination table this long after their last PONG,
-// and only a PING makes them answer — so ping well inside that window or
-// sending silently falls back to broadcast. See hb.setDeviceTimeout().
+// Devices drop out of the stream endpoint table this long after their last
+// PONG, and only a PING makes them answer. Streams wait for a full PONG
+// endpoint; they never fall back to broadcast. See hb.setDeviceTimeout().
 const uint32_t PING_INTERVAL_MS = 3000;
 
 Hapbeat hb;
 
 enum Playing { NONE, TIMED_A, TIMED_B, HELD_C };
 Playing playing = NONE;
+Hapbeat::Playback* currentPlayback = nullptr;
 uint32_t stopAtMs = 0;
 uint32_t lastPingMs = 0;
 uint8_t shownDevices = 0xFF;   // forces the first draw
@@ -42,7 +43,7 @@ Playing shownPlaying = NONE;
 
 // ── Screen ────────────────────────────────────────────────────────
 // Redrawn only when something changes. Every SPI write is time the loop is not
-// calling pumpSine(), and on hardware a per-frame redraw was enough to starve
+// calling tick(), and on hardware a per-frame redraw was enough to starve
 // the device's ring buffer and make the stream stutter.
 void drawButtons() {
   // The three hardware buttons sit under the screen at roughly 1/6, 1/2 and
@@ -84,7 +85,7 @@ void drawScreen() {
   M5.Display.setCursor(6, 60);
   if (devices == 0) {
     M5.Display.setTextColor(TFT_YELLOW, TFT_BLACK);
-    M5.Display.println("broadcast");
+    M5.Display.println("no endpoint");
     M5.Display.setTextSize(1);
     M5.Display.setCursor(6, 82);
     M5.Display.println("no device found - press RESET after");
@@ -110,15 +111,16 @@ void drawScreen() {
 // ── Playback ──────────────────────────────────────────────────────
 // Non-blocking on purpose: playSine() would block for its whole duration, which
 // would freeze the UI and — more importantly — make "play while held" and
-// "release to stop" impossible, since neither buttons nor pumpSine() get
+// "release to stop" impossible, since neither buttons nor tick() get
 // serviced meanwhile.
 void startTone(Playing which, float freqHz, uint32_t durationMs) {
   // Start the tone FIRST, then draw. Drawing blocks the loop for tens of ms, so
-  // putting it ahead of beginSine() would add exactly that much latency between
+  // putting it ahead of playSineSource() would add exactly that much latency between
   // the press and the buzz -- which is audible. It is safe to draw afterwards
-  // because beginSine() returns with the device's buffer already filled to its
-  // target lead, which is far more than a redraw consumes.
-  hb.beginSine(freqHz, INTENSITY);   // re-arms if a tone is already running
+  // because playSineSource() registers the source before the redraw.
+  if (currentPlayback) currentPlayback->stop();
+  currentPlayback = hb.playSineSource(freqHz, INTENSITY, durationMs, "", 0.0f,
+                                      durationMs == 0);
   stopAtMs = durationMs ? millis() + durationMs : 0;  // 0 = until released
   playing = which;
   drawButtons();
@@ -126,7 +128,8 @@ void startTone(Playing which, float freqHz, uint32_t durationMs) {
 }
 
 void stopTone() {
-  hb.endSine();
+  if (currentPlayback) currentPlayback->stop();
+  currentPlayback = nullptr;
   playing = NONE;
   stopAtMs = 0;
 }
@@ -143,18 +146,15 @@ void setup() {
   hb.begin(7700, "M5Sine");  // app name shows on the Hapbeat OLED
 
   M5.Display.println("finding\nHapbeat...");
-  // Register every device that answers, so streaming unicasts to all of them
-  // instead of broadcasting. Broadcast still works as a fallback, but an AP
-  // holds broadcast frames until its next DTIM beacon (100-300 ms) whenever any
-  // client on it is power-saving, which a continuous stream hears as dropouts.
+  // Register every device that answers, so streaming can unicast to each exact
+  // full-address endpoint. A stream with no resolved endpoint stays Deferred.
   hb.discover(1500);
   drawScreen();
 }
 
 void loop() {
   M5.update();
-  hb.pumpSine();  // keeps the device ring fed; self-paces, safe to call always
-  hb.poll();      // consume PONGs so the destination table stays current
+  hb.tick();      // consumes PONGs and services every endpoint-scoped stream
 
   if (M5.BtnA.wasPressed()) startTone(TIMED_A, FREQ_A, TIMED_MS);
   if (M5.BtnB.wasPressed()) startTone(TIMED_B, FREQ_B, TIMED_MS);

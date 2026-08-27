@@ -37,3 +37,7 @@ Other environments: `atoms3`, `stamps3`, `core`, `core2`, `fire`, `atom`, `stick
 - **A** → plays `HAPBEAT_EVENT` (deploy the `sample-kit` to your Hapbeat in Studio first).
 
 The Hapbeat must be on the same 2.4 GHz Wi-Fi/LAN as the board.
+
+Streaming uses the discovered full PONG endpoint and sends stereo PCM16 stream
+packets by exact unicast only. If no endpoint is resolved, the sine Playback is
+`Deferred(NoResolvedEndpoint)`; command broadcast forcing does not change this.

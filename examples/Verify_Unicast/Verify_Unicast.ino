@@ -1,14 +1,12 @@
-// Verify_Unicast — release check for unicast sending. Flash it and listen.
+// Verify_Unicast — release check for endpoint-scoped unicast streaming.
 //
-// Streams a CONTINUOUS 100 Hz sine and alternates the send path every 5 s:
-//
-//   [B] BROADCAST — expected to stutter every 100-300 ms. A Wi-Fi AP buffers
-//       group-addressed frames until its next DTIM beacon whenever ANY client
-//       on it is power-saving, and broadcast frames get no MAC ACK/retry.
-//   [A] UNICAST   — expected to be smooth.
+// Streams a CONTINUOUS 100 Hz sine. The command-routing setting alternates
+// every 5 s, but stream packets are always sent to exact resolved PONG
+// endpoints; a stream is never broadcast.
 //
 // A continuous low sine is the harshest case for the transport: every late or
-// lost packet is audible.
+// lost packet is audible. With no resolved endpoint the handle remains
+// Deferred(NoResolvedEndpoint) until a full-address PONG arrives.
 //
 // The current phase, device count and countdown go to the M5 screen when
 // M5Unified is installed, and always to Serial at 115200 — so this runs on any
@@ -36,14 +34,15 @@ const float INTENSITY = 0.6f;   // raise if you can barely feel it
 const uint32_t PHASE_MS = 5000;   // long enough to hear, short enough to compare
 
 Hapbeat hb;
-bool broadcastPhase = true;     // start with the "before" condition
+bool broadcastPhase = true;     // command routing only; streams stay unicast
+Hapbeat::Playback* playback = nullptr;
 uint32_t phaseStartMs = 0;
 uint32_t lastPingMs = 0;
 uint32_t lastScreenMs = 0;
 
 #ifdef HB_HAS_SCREEN
-// Phase banner. Colour carries the expectation at a glance so you can keep your
-// eyes on the device you are holding: red = the condition that should stutter.
+// Phase banner. The phase label describes command routing; stream packets are
+// always endpoint-scoped unicast.
 void drawPhase(uint8_t devices, const IPAddress* ips) {
   const uint16_t bg = broadcastPhase ? TFT_MAROON : TFT_DARKGREEN;
   M5.Display.fillScreen(bg);
@@ -51,11 +50,11 @@ void drawPhase(uint8_t devices, const IPAddress* ips) {
 
   M5.Display.setTextSize(3);
   M5.Display.setCursor(8, 10);
-  M5.Display.println(broadcastPhase ? "BROADCAST" : "UNICAST");
+  M5.Display.println(broadcastPhase ? "CMD BROADCAST" : "CMD UNICAST");
 
   M5.Display.setTextSize(2);
   M5.Display.setCursor(8, 50);
-  M5.Display.println(broadcastPhase ? "expect stutter" : "expect smooth");
+  M5.Display.println("STREAM UNICAST");
 
   M5.Display.setCursor(8, 80);
   M5.Display.printf("devices: %u\n", devices);
@@ -69,10 +68,10 @@ void drawPhase(uint8_t devices, const IPAddress* ips) {
   }
   if (devices == 0) {
     M5.Display.setCursor(8, y);
-    M5.Display.print("none known ->");
+    M5.Display.print("no endpoint ->");
     y += 20;
     M5.Display.setCursor(8, y);
-    M5.Display.print("broadcasting");
+    M5.Display.print("stream deferred");
     y += 20;
   }
   M5.Display.setCursor(8, y);
@@ -84,7 +83,7 @@ void drawPhase(uint8_t devices, const IPAddress* ips) {
 }
 
 // Only the digits are repainted each second; drawPhase() paints the label once.
-// Every SPI write is time the loop is not calling pumpSine(), and a full-line
+// Every SPI write is time the loop is not calling tick(), and a full-line
 // redraw measurably increased dropped sends on hardware.
 void drawCountdown() {
   const uint16_t bg = broadcastPhase ? TFT_MAROON : TFT_DARKGREEN;
@@ -97,18 +96,14 @@ void drawCountdown() {
 #endif
 
 void startPhase() {
-  // Deliberately NO endSine()/beginSine() here: the stream keeps running and
-  // only its route changes. Tearing it down and restarting would send
-  // STREAM_END over the OLD route and STREAM_BEGIN over the NEW one, and a
-  // broadcast END can be held by the AP's DTIM buffer long enough to arrive
-  // AFTER the unicast BEGIN -- killing the stream that just started. That is
-  // what made unicast phases silent on hardware.
+  // Keep the same Playback source while changing command routing. Endpoint
+  // migration is handled by the hub without an END/BEGIN cross-route race.
   hb.setBroadcastOnly(broadcastPhase);
   IPAddress ips[4];
   const uint8_t devices = hb.deviceIps(ips, 4);
   Serial.printf("\n[%s] devices=%u  (%s)\n",
-                broadcastPhase ? "B] BROADCAST" : "A] UNICAST  ", devices,
-                broadcastPhase ? "expect stutter" : "expect smooth");
+                broadcastPhase ? "B] CMD BROADCAST" : "A] CMD UNICAST  ", devices,
+                "stream packets always exact-unicast");
   // Printing the actual destinations is what tells you, after a power cycle,
   // whether the device came back on the same IP or left a stale entry behind.
   for (uint8_t i = 0; i < devices; ++i)
@@ -116,7 +111,8 @@ void startPhase() {
 #ifdef HB_HAS_SCREEN
   drawPhase(devices, ips);
 #endif
-  if (!hb.sineActive()) hb.beginSine(TONE_HZ, INTENSITY);  // first phase only
+  if (!playback)
+    playback = hb.playSineSource(TONE_HZ, INTENSITY, 0, "", 0.0f, true);
   phaseStartMs = millis();
 }
 
@@ -144,7 +140,7 @@ void setup() {
   // Collects EVERY device that replies, not just the first (blocks ~1.5 s).
   const bool found = hb.discover(1500);
   Serial.printf("discover: %s (%u device(s))\n",
-                found ? "ok" : "NOTHING FOUND -- will broadcast",
+                found ? "ok" : "NOTHING FOUND -- stream remains deferred",
                 hb.deviceCount());
   if (!found) {
     Serial.println("  check: same Wi-Fi as the Hapbeat? AP client isolation off?");
@@ -153,12 +149,11 @@ void setup() {
 }
 
 void loop() {
-  hb.pumpSine();   // keeps the device ring fed; self-paces
-  hb.poll();       // consume PONGs even during the broadcast-only phase
+  hb.tick();       // consume PONGs and service exact stream endpoints
 
   // Devices age out of the table after 15 s without a PONG, and only a PING
-  // makes them reply. Without this, unicast would silently fall back to
-  // broadcast partway through and the A/B would compare nothing.
+  // makes them reply. Without this, the stream handle becomes Deferred when
+  // the endpoint expires; it never falls back to broadcast.
   if (millis() - lastPingMs >= 3000) {
     lastPingMs = millis();
     hb.ping();
