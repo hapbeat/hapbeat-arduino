@@ -25,20 +25,25 @@ enum class HapbeatDeferredReason : uint8_t {
   NoResolvedEndpoint,
 };
 
-// Handle for one logical synthesized-sine source. It is a small value carrying
-// a generation token, so source-slot recycling cannot retarget an older handle.
+// Handle for one logical synthesized-sine source. It is a move-only value
+// carrying generation tokens, so source-slot recycling cannot retarget an
+// older handle. It does not retain its Hapbeat owner: keep the owner alive
+// while using a handle; after owner destruction valid() is false and methods
+// are safe no-ops (apart from cached value getters).
 class HapbeatPlayback {
  public:
   HapbeatPlayback() = default;
+  HapbeatPlayback(const HapbeatPlayback&) = delete;
+  HapbeatPlayback& operator=(const HapbeatPlayback&) = delete;
+  HapbeatPlayback(HapbeatPlayback&& other) noexcept;
+  HapbeatPlayback& operator=(HapbeatPlayback&& other) noexcept;
   uint16_t id() const { return _id; }
-  bool valid() const {
-    return _hub != nullptr && _id != 0 && _generation != 0;
-  }
+  bool valid() const;
   HapbeatPlaybackStatus status() const;
   HapbeatDeferredReason deferredReason() const;
-  float gain() const { return _gain; }
-  float pan() const { return _pan; }
-  bool loop() const { return _loop; }
+  float gain() const;
+  float pan() const;
+  bool loop() const;
 
   void setGain(float value);
   void setPan(float value);
@@ -55,6 +60,7 @@ class HapbeatPlayback {
   Hapbeat* _hub = nullptr;
   uint8_t _slot = 0;
   uint16_t _id = 0;
+  uint64_t _ownerGeneration = 0;
   uint64_t _generation = 0;
   float _gain = 1.0f;
   float _pan = 0.0f;
@@ -62,6 +68,7 @@ class HapbeatPlayback {
 
   void reset(Hapbeat* hub, uint8_t slot, uint16_t id, uint64_t generation,
              float gain, float pan, bool loop);
+  void invalidate();
 };
 
 class Hapbeat {
@@ -69,6 +76,13 @@ class Hapbeat {
   using Playback = HapbeatPlayback;
   using PlaybackStatus = HapbeatPlaybackStatus;
   using DeferredReason = HapbeatDeferredReason;
+
+  Hapbeat();
+  ~Hapbeat();
+  Hapbeat(const Hapbeat&) = delete;
+  Hapbeat& operator=(const Hapbeat&) = delete;
+  Hapbeat(Hapbeat&&) = delete;
+  Hapbeat& operator=(Hapbeat&&) = delete;
 
   // Open the UDP socket for sending. appName (<=16 chars) shows on the device
   // OLED while connected. Call after Wi-Fi is connected.
@@ -106,7 +120,8 @@ class Hapbeat {
   // Register a synthesized sine source and return its independently controllable
   // value handle. durationMs == 0 means open-ended; loop repeats a finite source.
   // The source is generated as 16 kHz mono and mixed as canonical 16 kHz stereo
-  // PCM16 by the endpoint session. Call tick() frequently from loop().
+  // PCM16 by the endpoint session. Non-finite frequency, intensity, or pan is
+  // rejected with an invalid handle. Call tick() frequently from loop().
   Playback playSineSource(float freqHz, float intensity,
                           uint32_t durationMs = 0,
                           const char* target = "", float pan = 0.0f,
@@ -132,6 +147,7 @@ class Hapbeat {
   static const uint8_t MAX_STREAM_SOURCES = 8;
   static const uint8_t MAX_STREAM_SESSIONS = 8;
   static const uint8_t MAX_END_RECORDS = 8;
+  static const uint8_t MAX_OWNER_TOKENS = 16;
   static const uint16_t STREAM_SAMPLE_RATE = 16000;
   static const uint8_t STREAM_CHANNELS = 2;
   static const uint16_t STREAM_CHUNK_FRAMES = 256;
@@ -200,6 +216,15 @@ class Hapbeat {
   KnownDevice _devices[MAX_DEVICES];
   uint32_t _deviceTimeoutMs = 15000;
   uint64_t _lastPollMs = 0;
+  struct OwnerToken {
+    Hapbeat* owner = nullptr;
+    uint64_t generation = 0;
+    bool used = false;
+  };
+  static OwnerToken _ownerTokens[MAX_OWNER_TOKENS];
+  static uint64_t _nextOwnerToken;
+  uint64_t _ownerGeneration = 0;
+  bool _ownerRegistered = false;
   mutable uint32_t _lastMillisRaw = 0;
   mutable uint64_t _extendedMillis = 0;
   mutable bool _clockInitialized = false;
@@ -238,6 +263,9 @@ class Hapbeat {
   uint8_t aliveCount() const;
 
   uint64_t extendedMillis() const;
+  bool registerOwner();
+  void unregisterOwner();
+  static bool ownerAlive(const Hapbeat* owner, uint64_t generation);
   void reconcileStreams(uint64_t now);
   void pumpStreams(uint64_t now);
   bool sendStreamBegin(StreamSession& session);
@@ -252,6 +280,8 @@ class Hapbeat {
                                        uint64_t generation) const;
   HapbeatDeferredReason playbackReason(uint8_t slot, uint16_t id,
                                         uint64_t generation) const;
+  bool playbackValues(uint8_t slot, uint16_t id, uint64_t generation,
+                      float& gain, float& pan, bool& loop) const;
   void clearAllSources(bool sendEnds);
 
   uint8_t collectStreamEndpoints(StreamEndpoint* out, uint8_t maxOut) const;

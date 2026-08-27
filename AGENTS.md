@@ -77,10 +77,13 @@ void loop() {
 | `poll()` / `deviceCount()` / `deviceIp()` | drain pending PONGs (optional; sends do it too) / live device count / first device |
 | `setDeviceIp(ip)` | pin a device by IP (never expires); `0.0.0.0` clears pinned entries |
 | `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | liveness window (default 15 s) / force command broadcast; streams still need a full PONG endpoint |
-| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a value `Playback` handle |
+| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a move-only value `Playback` handle; keep the owning `Hapbeat` alive while using it |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
 | `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
 | `end()` | tell the device this app is leaving (clears the OLED app name) |
+
+`playSineSource` rejects non-finite frequency, intensity, and pan values with
+an invalid handle.
 
 `target`: `""` = every resolved stream endpoint (and every command device).
 Addresses are always
@@ -104,6 +107,8 @@ segment, a short target front-matches. So `"player_1/pos_neck"` and
   call — call it every `loop()` iteration; never block `loop()` > ~160 ms.
 - Commands may fall back to broadcast while no destination is known. Stream
   handles become `Deferred(NoResolvedEndpoint)` until a full endpoint resolves;
+  handles do not retain their owner, so keep `Hapbeat` alive while using them;
+  after owner destruction `valid()` is false and handle methods do not dereference it;
   `setBroadcastOnly(true)` never changes stream routing. Empty sessions linger
   310 ms before `STREAM_END`, followed by a 310 ms cooldown before a new BEGIN.
 

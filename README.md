@@ -72,13 +72,16 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 | `begin(port = 7700, appName = "")` | open the UDP socket; announce app name |
 | `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event (gain 0..1; `pan` is the left/right balance, -1 = left only … 0 = centre … +1 = right only) |
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
-| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a value `Playback` handle |
+| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a move-only value `Playback` handle; keep the owning `Hapbeat` alive while using it |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
 | `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
 | `ping()` / `end()` | keep-alive probe / announce disconnect |
 | `discover(timeoutMs = 1500)` | broadcast a PING and collect every reply |
 | `poll()` / `deviceCount()` / `deviceIp()` | device table upkeep and inspection |
 | `setDeviceIp(ip)` / `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | command routing controls; streams still require a full PONG endpoint |
+
+`playSineSource` rejects non-finite frequency, intensity, and pan values with
+an invalid handle.
 
 ### Addressing
 
@@ -119,7 +122,9 @@ a PONG. Commands then fall back to broadcast; stream handles become
 `setBroadcastOnly(true)` only when command packets should be broadcast.
 
 Each `playSineSource` handle has independent status, gain, pan, loop, and
-idempotent `stop()` control. The hub mixes all matching sources per exact
+idempotent `stop()` control. Handles do not retain their owning `Hapbeat`;
+after owner destruction `valid()` is false and handle methods do not access the
+destroyed object. The hub mixes all matching sources per exact
 endpoint as 16 kHz stereo PCM16, keeps a per-endpoint cursor, and uses a short
 empty-session linger/cooldown around `STREAM_END`.
 

@@ -8,6 +8,7 @@ namespace {
 
 constexpr size_t kPongBufferSize = 256;
 constexpr float kPhaseToRadians = 6.28318530717958647692f / 4294967296.0f;
+constexpr double kPhaseModulus = 4294967296.0;
 
 bool readCString(const uint8_t* data, size_t end, size_t& pos, char* out,
                  size_t capacity) {
@@ -46,45 +47,165 @@ bool parsePongAddress(const uint8_t* packet, size_t packetLength, char* address,
 
 }  // namespace
 
+Hapbeat::OwnerToken Hapbeat::_ownerTokens[Hapbeat::MAX_OWNER_TOKENS] = {};
+uint64_t Hapbeat::_nextOwnerToken = 0;
+
+Hapbeat::Hapbeat() = default;
+
+Hapbeat::~Hapbeat() { unregisterOwner(); }
+
+bool Hapbeat::registerOwner() {
+  if (_ownerRegistered) return true;
+  for (uint8_t i = 0; i < MAX_OWNER_TOKENS; ++i) {
+    OwnerToken& token = _ownerTokens[i];
+    if (token.used) continue;
+    ++_nextOwnerToken;
+    if (_nextOwnerToken == 0) ++_nextOwnerToken;
+    token.owner = this;
+    token.generation = _nextOwnerToken;
+    token.used = true;
+    _ownerGeneration = token.generation;
+    _ownerRegistered = true;
+    return true;
+  }
+  return false;
+}
+
+void Hapbeat::unregisterOwner() {
+  if (!_ownerRegistered) return;
+  for (uint8_t i = 0; i < MAX_OWNER_TOKENS; ++i) {
+    OwnerToken& token = _ownerTokens[i];
+    if (!token.used || token.owner != this ||
+        token.generation != _ownerGeneration)
+      continue;
+    token = OwnerToken();
+    break;
+  }
+  _ownerRegistered = false;
+  _ownerGeneration = 0;
+}
+
+bool Hapbeat::ownerAlive(const Hapbeat* owner, uint64_t generation) {
+  if (!owner || generation == 0) return false;
+  for (uint8_t i = 0; i < MAX_OWNER_TOKENS; ++i) {
+    const OwnerToken& token = _ownerTokens[i];
+    if (token.used && token.owner == owner && token.generation == generation)
+      return true;
+  }
+  return false;
+}
+
+HapbeatPlayback::HapbeatPlayback(HapbeatPlayback&& other) noexcept {
+  _hub = other._hub;
+  _slot = other._slot;
+  _id = other._id;
+  _ownerGeneration = other._ownerGeneration;
+  _generation = other._generation;
+  _gain = other._gain;
+  _pan = other._pan;
+  _loop = other._loop;
+  other.invalidate();
+}
+
+HapbeatPlayback& HapbeatPlayback::operator=(HapbeatPlayback&& other) noexcept {
+  if (this == &other) return *this;
+  _hub = other._hub;
+  _slot = other._slot;
+  _id = other._id;
+  _ownerGeneration = other._ownerGeneration;
+  _generation = other._generation;
+  _gain = other._gain;
+  _pan = other._pan;
+  _loop = other._loop;
+  other.invalidate();
+  return *this;
+}
+
+void HapbeatPlayback::invalidate() {
+  _hub = nullptr;
+  _slot = 0;
+  _id = 0;
+  _ownerGeneration = 0;
+  _generation = 0;
+  _gain = 1.0f;
+  _pan = 0.0f;
+  _loop = false;
+}
+
 void HapbeatPlayback::reset(Hapbeat* hub, uint8_t slot, uint16_t id,
                             uint64_t generation, float gain, float pan,
                             bool loop) {
   _hub = hub;
   _slot = slot;
   _id = id;
+  _ownerGeneration = hub ? hub->_ownerGeneration : 0;
   _generation = generation;
   _gain = gain;
   _pan = pan;
   _loop = loop;
 }
 
+bool HapbeatPlayback::valid() const {
+  return _hub != nullptr && _id != 0 && _generation != 0 &&
+         Hapbeat::ownerAlive(_hub, _ownerGeneration);
+}
+
 HapbeatPlaybackStatus HapbeatPlayback::status() const {
-  if (!_hub || !_generation) return HapbeatPlaybackStatus::Stopped;
+  if (!valid()) return HapbeatPlaybackStatus::Stopped;
   return _hub->playbackStatus(_slot, _id, _generation);
 }
 
 HapbeatDeferredReason HapbeatPlayback::deferredReason() const {
-  if (!_hub || !_generation) return HapbeatDeferredReason::None;
+  if (!valid()) return HapbeatDeferredReason::None;
   return _hub->playbackReason(_slot, _id, _generation);
 }
 
+float HapbeatPlayback::gain() const {
+  float gain = _gain;
+  float pan = _pan;
+  bool loop = _loop;
+  if (valid() && _hub->playbackValues(_slot, _id, _generation, gain, pan, loop))
+    return gain;
+  return _gain;
+}
+
+float HapbeatPlayback::pan() const {
+  float gain = _gain;
+  float pan = _pan;
+  bool loop = _loop;
+  if (valid() && _hub->playbackValues(_slot, _id, _generation, gain, pan, loop))
+    return pan;
+  return _pan;
+}
+
+bool HapbeatPlayback::loop() const {
+  float gain = _gain;
+  float pan = _pan;
+  bool loop = _loop;
+  if (valid() && _hub->playbackValues(_slot, _id, _generation, gain, pan, loop))
+    return loop;
+  return _loop;
+}
+
 void HapbeatPlayback::setGain(float value) {
+  if (!isfinite(value)) return;
   _gain = Hapbeat::clampFloat(value, 0.0f, 1.0f);
-  if (_hub) _hub->setSourceGain(_slot, _id, _generation, _gain);
+  if (valid()) _hub->setSourceGain(_slot, _id, _generation, _gain);
 }
 
 void HapbeatPlayback::setPan(float value) {
+  if (!isfinite(value)) return;
   _pan = Hapbeat::clampFloat(value, -1.0f, 1.0f);
-  if (_hub) _hub->setSourcePan(_slot, _id, _generation, _pan);
+  if (valid()) _hub->setSourcePan(_slot, _id, _generation, _pan);
 }
 
 void HapbeatPlayback::setLoop(bool value) {
   _loop = value;
-  if (_hub) _hub->setSourceLoop(_slot, _id, _generation, _loop);
+  if (valid()) _hub->setSourceLoop(_slot, _id, _generation, _loop);
 }
 
 void HapbeatPlayback::stop() {
-  if (!_hub || status() == HapbeatPlaybackStatus::Stopped) return;
+  if (!valid() || status() == HapbeatPlaybackStatus::Stopped) return;
   _hub->stopSource(_slot, _id, _generation);
 }
 
@@ -102,6 +223,7 @@ uint64_t Hapbeat::extendedMillis() const {
 }
 
 bool Hapbeat::begin(uint16_t port, const char* appName) {
+  if (!_ownerRegistered && !registerOwner()) return false;
   _port = port;
   _appName[0] = '\0';
   if (appName) {
@@ -336,6 +458,7 @@ bool Hapbeat::discover(uint32_t timeoutMs) {
 
 void Hapbeat::play(const char* eventId, float gain, const char* target,
                    float pan) {
+  if (!isfinite(gain) || !isfinite(pan)) return;
   uint8_t packet[256];
   sendRouted(packet, hapbeat::buildPlay(packet, sizeof(packet), nextSeq(), eventId,
                                         target, 0, gain, pan));
@@ -379,7 +502,8 @@ Hapbeat::Playback Hapbeat::playSineSource(float freqHz, float intensity,
                                           uint32_t durationMs,
                                           const char* target, float pan,
                                           bool loop) {
-  if (!_ready) return Playback();
+  if (!_ready || !isfinite(freqHz) || !isfinite(intensity) || !isfinite(pan))
+    return Playback();
   const char* targetValue = target ? target : "";
   const size_t targetLength = strlen(targetValue);
   if (targetLength > hapbeat::MAX_DEVICE_ADDRESS_LEN) return Playback();
@@ -401,13 +525,14 @@ Hapbeat::Playback Hapbeat::playSineSource(float freqHz, float intensity,
   }
   source.used = true;
   source.id = nextPlaybackId();
-  const double scaledStep = (double)freqHz * 4294967296.0 /
+  const double scaledStep = (double)freqHz * kPhaseModulus /
                             (double)STREAM_SAMPLE_RATE;
-  const int64_t roundedStep = scaledStep >= 0.0
-                                  ? (int64_t)(scaledStep + 0.5)
-                                  : (int64_t)(scaledStep - 0.5);
+  const double wrappedStep = fmod(scaledStep, kPhaseModulus);
+  const double roundedStep = wrappedStep >= 0.0
+                                 ? floor(wrappedStep + 0.5)
+                                 : ceil(wrappedStep - 0.5);
   source.generation = nextPlaybackGeneration();
-  source.phaseStep = (uint32_t)roundedStep;
+  source.phaseStep = (uint32_t)(int64_t)roundedStep;
   source.amplitude = (int16_t)(0.8f * 32767.0f);
   if (durationMs == 0) {
     source.totalFrames = 0;  // open-ended source
@@ -451,6 +576,7 @@ void Hapbeat::tick() {
 }
 
 float Hapbeat::clampFloat(float value, float minimum, float maximum) {
+  if (!isfinite(value)) return minimum;
   if (value < minimum) return minimum;
   if (value > maximum) return maximum;
   return value;
@@ -962,6 +1088,7 @@ void Hapbeat::stopSource(uint8_t slot, uint16_t id, uint64_t generation) {
 
 void Hapbeat::setSourceGain(uint8_t slot, uint16_t id, uint64_t generation,
                             float value) {
+  if (!isfinite(value)) return;
   if (slot < MAX_STREAM_SOURCES && _sources[slot].used &&
       _sources[slot].id == id && _sources[slot].generation == generation)
     _sources[slot].gain = clampFloat(value, 0.0f, 1.0f);
@@ -969,6 +1096,7 @@ void Hapbeat::setSourceGain(uint8_t slot, uint16_t id, uint64_t generation,
 
 void Hapbeat::setSourcePan(uint8_t slot, uint16_t id, uint64_t generation,
                            float value) {
+  if (!isfinite(value)) return;
   if (slot < MAX_STREAM_SOURCES && _sources[slot].used &&
       _sources[slot].id == id && _sources[slot].generation == generation)
     _sources[slot].pan = clampFloat(value, -1.0f, 1.0f);
@@ -1001,6 +1129,17 @@ HapbeatDeferredReason Hapbeat::playbackReason(uint8_t slot, uint16_t id,
       _sources[slot].id != id || _sources[slot].generation != generation)
     return HapbeatDeferredReason::None;
   return _sources[slot].reason;
+}
+
+bool Hapbeat::playbackValues(uint8_t slot, uint16_t id, uint64_t generation,
+                             float& gain, float& pan, bool& loop) const {
+  if (slot >= MAX_STREAM_SOURCES || !_sources[slot].used ||
+      _sources[slot].id != id || _sources[slot].generation != generation)
+    return false;
+  gain = _sources[slot].gain;
+  pan = _sources[slot].pan;
+  loop = _sources[slot].loop;
+  return true;
 }
 
 void Hapbeat::clearAllSources(bool sendEnds) {

@@ -2,6 +2,8 @@
 #include <math.h>
 #include <stdint.h>
 #include <string.h>
+#include <type_traits>
+#include <utility>
 
 #include <vector>
 
@@ -16,6 +18,15 @@ uint32_t hapbeat_host_now_ms = 0;
 std::vector<WiFiUDP::Sent> WiFiUDP::sent;
 std::deque<WiFiUDP::Inbound> WiFiUDP::inbound;
 int WiFiUDP::failEndPackets = 0;
+
+static_assert(!std::is_copy_constructible<Hapbeat::Playback>::value,
+              "Playback must be move-only");
+static_assert(!std::is_copy_assignable<Hapbeat::Playback>::value,
+              "Playback must not be copy-assignable");
+static_assert(std::is_move_constructible<Hapbeat::Playback>::value,
+              "Playback must be move-constructible");
+static_assert(std::is_move_assignable<Hapbeat::Playback>::value,
+              "Playback must be move-assignable");
 
 static std::vector<uint8_t> pong(const char* address) {
   std::vector<uint8_t> packet(8 + 16, 0);
@@ -254,6 +265,44 @@ static void test_begin_retry_and_source_pool_exhaustion() {
   assert(generationHub._sources[0].gain == 0.75f);
   assert(generationHub._sources[0].pan == 0.0f);
   assert(generationHub._sources[0].loop);
+
+  // Getters read the production source state, not a stale handle cache.
+  generationHub._sources[0].gain = 0.6f;
+  generationHub._sources[0].pan = -0.25f;
+  generationHub._sources[0].loop = false;
+  assert(replacement.gain() == 0.6f);
+  assert(replacement.pan() == -0.25f);
+  assert(!replacement.loop());
+
+  // Moving transfers the generation token and invalidates the old value.
+  Hapbeat::Playback moved(std::move(replacement));
+  assert(!replacement.valid());
+  assert(moved.valid());
+  replacement.setGain(0.1f);
+  replacement.setPan(1.0f);
+  replacement.setLoop(true);
+  assert(moved.gain() == 0.6f);
+  assert(moved.pan() == -0.25f);
+  assert(!moved.loop());
+  Hapbeat::Playback assigned;
+  assigned = std::move(moved);
+  assert(!moved.valid());
+  assert(assigned.valid());
+  assigned.setGain(0.4f);
+  assigned.setPan(0.25f);
+  assigned.setLoop(true);
+  assert(assigned.gain() == 0.4f);
+  assert(assigned.pan() == 0.25f);
+  assert(assigned.loop());
+  assert(generationHub._sources[0].gain == 0.4f);
+  assert(generationHub._sources[0].pan == 0.25f);
+  assert(generationHub._sources[0].loop);
+  moved.setGain(0.9f);
+  moved.setPan(-1.0f);
+  moved.setLoop(false);
+  assert(assigned.gain() == 0.4f);
+  assert(assigned.pan() == 0.25f);
+  assert(assigned.loop());
 
   // Fixed source-pool exhaustion is reported without heap allocation.
   Hapbeat poolHub;
@@ -550,6 +599,81 @@ static void test_finite_duration_frame_count_width() {
          ((uint64_t)0xffffffffu * 16000ULL) / 1000ULL);
 }
 
+static void test_playback_owner_lifetime() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat::Playback orphan;
+  {
+    Hapbeat first;
+    assert(first.begin());
+    WiFiUDP::inject(IPAddress(192, 0, 2, 100), 7700,
+                    pong("player_13/chest/group_1"));
+    first.poll();
+    orphan = first.playSineSource(100.0f, 0.75f, 0, "player_13/chest", 0.0f,
+                                  true);
+    assert(orphan.valid());
+  }
+  // The owner token is retired before the stack address can be reused.
+  assert(!orphan.valid());
+  assert(orphan.status() == HapbeatPlaybackStatus::Stopped);
+  assert(orphan.deferredReason() == HapbeatDeferredReason::None);
+  orphan.setGain(0.1f);
+  orphan.setPan(-1.0f);
+  orphan.setLoop(false);
+  orphan.stop();
+
+  Hapbeat second;
+  assert(second.begin());
+  WiFiUDP::inject(IPAddress(192, 0, 2, 101), 7700,
+                  pong("player_13/chest/group_1"));
+  second.poll();
+  Hapbeat::Playback current =
+      second.playSineSource(100.0f, 0.5f, 0, "player_13/chest", 0.0f, true);
+  assert(current.valid());
+  orphan.setGain(0.9f);
+  orphan.setPan(1.0f);
+  orphan.setLoop(false);
+  assert(current.gain() == 0.5f);
+  assert(current.pan() == 0.0f);
+  assert(current.loop());
+}
+
+static void test_nonfinite_sine_parameters_are_rejected() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  Hapbeat::Playback nanFrequency =
+      hb.playSineSource(NAN, 1.0f, 0, "player_14/chest", 0.0f, true);
+  Hapbeat::Playback infiniteGain =
+      hb.playSineSource(100.0f, INFINITY, 0, "player_14/chest", 0.0f, true);
+  Hapbeat::Playback infinitePan = hb.playSineSource(
+      100.0f, 1.0f, 0, "player_14/chest", -INFINITY, true);
+  assert(!nanFrequency.valid());
+  assert(!infiniteGain.valid());
+  assert(!infinitePan.valid());
+  assert(!hb._sources[0].used);
+
+  WiFiUDP::inject(IPAddress(192, 0, 2, 102), 7700,
+                  pong("player_14/chest/group_1"));
+  hb.poll();
+  Hapbeat::Playback playback =
+      hb.playSineSource(100.0f, 0.5f, 0, "player_14/chest", 0.25f, true);
+  assert(playback.valid());
+  playback.setGain(NAN);
+  playback.setPan(INFINITY);
+  assert(playback.gain() == 0.5f);
+  assert(playback.pan() == 0.25f);
+  assert(playback.loop());
+  assert(hb._sources[0].gain == 0.5f);
+  assert(hb._sources[0].pan == 0.25f);
+  WiFiUDP::sent.clear();
+  hb.play("test.nan_gain", NAN, "player_14/chest", 0.0f);
+  hb.play("test.inf_pan", 1.0f, "player_14/chest", INFINITY);
+  assert(WiFiUDP::sent.empty());
+  playback.stop();
+}
+
 int main() {
   test_routing_and_mixing();
   test_same_address_different_ip_are_distinct();
@@ -563,5 +687,7 @@ int main() {
   test_frame_counter_wraparound();
   test_fixed_point_phase_after_long_cursor();
   test_finite_duration_frame_count_width();
+  test_playback_owner_lifetime();
+  test_nonfinite_sine_parameters_are_rejected();
   return 0;
 }
