@@ -122,11 +122,15 @@ a PONG. Commands then fall back to broadcast; stream handles become
 `setBroadcastOnly(true)` only when command packets should be broadcast.
 
 Each `playSineSource` handle has independent status, gain, pan, loop, and
-idempotent `stop()` control. Handles do not retain their owning `Hapbeat`;
-after owner destruction `valid()` is false and handle methods do not access the
-destroyed object. The hub mixes all matching sources per exact
+idempotent `stop()` control. Handles do not retain their owning `Hapbeat`; the
+owner must outlive each handle, and no handle method may be called after owner
+destruction. The hub mixes all matching sources per exact
 endpoint as 16 kHz stereo PCM16, keeps a per-endpoint cursor, and uses a short
 empty-session linger/cooldown around `STREAM_END`.
+
+`Hapbeat` is not thread-safe. Synchronize callers that share one instance;
+independent instances have independent stream state and do not require shared
+locking.
 
 ## How it works at the byte level
 

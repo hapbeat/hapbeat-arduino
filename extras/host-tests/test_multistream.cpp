@@ -599,45 +599,6 @@ static void test_finite_duration_frame_count_width() {
          ((uint64_t)0xffffffffu * 16000ULL) / 1000ULL);
 }
 
-static void test_playback_owner_lifetime() {
-  WiFiUDP::clear();
-  hapbeat_host_now_ms = 0;
-  Hapbeat::Playback orphan;
-  {
-    Hapbeat first;
-    assert(first.begin());
-    WiFiUDP::inject(IPAddress(192, 0, 2, 100), 7700,
-                    pong("player_13/chest/group_1"));
-    first.poll();
-    orphan = first.playSineSource(100.0f, 0.75f, 0, "player_13/chest", 0.0f,
-                                  true);
-    assert(orphan.valid());
-  }
-  // The owner token is retired before the stack address can be reused.
-  assert(!orphan.valid());
-  assert(orphan.status() == HapbeatPlaybackStatus::Stopped);
-  assert(orphan.deferredReason() == HapbeatDeferredReason::None);
-  orphan.setGain(0.1f);
-  orphan.setPan(-1.0f);
-  orphan.setLoop(false);
-  orphan.stop();
-
-  Hapbeat second;
-  assert(second.begin());
-  WiFiUDP::inject(IPAddress(192, 0, 2, 101), 7700,
-                  pong("player_13/chest/group_1"));
-  second.poll();
-  Hapbeat::Playback current =
-      second.playSineSource(100.0f, 0.5f, 0, "player_13/chest", 0.0f, true);
-  assert(current.valid());
-  orphan.setGain(0.9f);
-  orphan.setPan(1.0f);
-  orphan.setLoop(false);
-  assert(current.gain() == 0.5f);
-  assert(current.pan() == 0.0f);
-  assert(current.loop());
-}
-
 static void test_nonfinite_sine_parameters_are_rejected() {
   WiFiUDP::clear();
   hapbeat_host_now_ms = 0;
@@ -687,7 +648,6 @@ int main() {
   test_frame_counter_wraparound();
   test_fixed_point_phase_after_long_cursor();
   test_finite_duration_frame_count_width();
-  test_playback_owner_lifetime();
   test_nonfinite_sine_parameters_are_rejected();
   return 0;
 }

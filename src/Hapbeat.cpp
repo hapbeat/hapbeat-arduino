@@ -47,59 +47,10 @@ bool parsePongAddress(const uint8_t* packet, size_t packetLength, char* address,
 
 }  // namespace
 
-Hapbeat::OwnerToken Hapbeat::_ownerTokens[Hapbeat::MAX_OWNER_TOKENS] = {};
-uint64_t Hapbeat::_nextOwnerToken = 0;
-
-Hapbeat::Hapbeat() = default;
-
-Hapbeat::~Hapbeat() { unregisterOwner(); }
-
-bool Hapbeat::registerOwner() {
-  if (_ownerRegistered) return true;
-  for (uint8_t i = 0; i < MAX_OWNER_TOKENS; ++i) {
-    OwnerToken& token = _ownerTokens[i];
-    if (token.used) continue;
-    ++_nextOwnerToken;
-    if (_nextOwnerToken == 0) ++_nextOwnerToken;
-    token.owner = this;
-    token.generation = _nextOwnerToken;
-    token.used = true;
-    _ownerGeneration = token.generation;
-    _ownerRegistered = true;
-    return true;
-  }
-  return false;
-}
-
-void Hapbeat::unregisterOwner() {
-  if (!_ownerRegistered) return;
-  for (uint8_t i = 0; i < MAX_OWNER_TOKENS; ++i) {
-    OwnerToken& token = _ownerTokens[i];
-    if (!token.used || token.owner != this ||
-        token.generation != _ownerGeneration)
-      continue;
-    token = OwnerToken();
-    break;
-  }
-  _ownerRegistered = false;
-  _ownerGeneration = 0;
-}
-
-bool Hapbeat::ownerAlive(const Hapbeat* owner, uint64_t generation) {
-  if (!owner || generation == 0) return false;
-  for (uint8_t i = 0; i < MAX_OWNER_TOKENS; ++i) {
-    const OwnerToken& token = _ownerTokens[i];
-    if (token.used && token.owner == owner && token.generation == generation)
-      return true;
-  }
-  return false;
-}
-
 HapbeatPlayback::HapbeatPlayback(HapbeatPlayback&& other) noexcept {
   _hub = other._hub;
   _slot = other._slot;
   _id = other._id;
-  _ownerGeneration = other._ownerGeneration;
   _generation = other._generation;
   _gain = other._gain;
   _pan = other._pan;
@@ -112,7 +63,6 @@ HapbeatPlayback& HapbeatPlayback::operator=(HapbeatPlayback&& other) noexcept {
   _hub = other._hub;
   _slot = other._slot;
   _id = other._id;
-  _ownerGeneration = other._ownerGeneration;
   _generation = other._generation;
   _gain = other._gain;
   _pan = other._pan;
@@ -125,7 +75,6 @@ void HapbeatPlayback::invalidate() {
   _hub = nullptr;
   _slot = 0;
   _id = 0;
-  _ownerGeneration = 0;
   _generation = 0;
   _gain = 1.0f;
   _pan = 0.0f;
@@ -138,7 +87,6 @@ void HapbeatPlayback::reset(Hapbeat* hub, uint8_t slot, uint16_t id,
   _hub = hub;
   _slot = slot;
   _id = id;
-  _ownerGeneration = hub ? hub->_ownerGeneration : 0;
   _generation = generation;
   _gain = gain;
   _pan = pan;
@@ -146,8 +94,7 @@ void HapbeatPlayback::reset(Hapbeat* hub, uint8_t slot, uint16_t id,
 }
 
 bool HapbeatPlayback::valid() const {
-  return _hub != nullptr && _id != 0 && _generation != 0 &&
-         Hapbeat::ownerAlive(_hub, _ownerGeneration);
+  return _hub != nullptr && _id != 0 && _generation != 0;
 }
 
 HapbeatPlaybackStatus HapbeatPlayback::status() const {
@@ -223,7 +170,6 @@ uint64_t Hapbeat::extendedMillis() const {
 }
 
 bool Hapbeat::begin(uint16_t port, const char* appName) {
-  if (!_ownerRegistered && !registerOwner()) return false;
   _port = port;
   _appName[0] = '\0';
   if (appName) {

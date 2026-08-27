@@ -4,6 +4,8 @@
 // providing WiFiUDP). Connect Wi-Fi in your sketch first, then call begin().
 // Streaming uses a fixed-capacity, endpoint-scoped mixer. It does not allocate
 // on the heap and never broadcasts stream packets.
+// A Hapbeat instance is not thread-safe; synchronize callers that share one
+// instance. Independent Hapbeat instances have independent stream state.
 #ifndef HAPBEAT_H
 #define HAPBEAT_H
 
@@ -27,9 +29,8 @@ enum class HapbeatDeferredReason : uint8_t {
 
 // Handle for one logical synthesized-sine source. It is a move-only value
 // carrying generation tokens, so source-slot recycling cannot retarget an
-// older handle. It does not retain its Hapbeat owner: keep the owner alive
-// while using a handle; after owner destruction valid() is false and methods
-// are safe no-ops (apart from cached value getters).
+// older handle. It does not retain its Hapbeat owner: the owner must outlive
+// the handle, and no handle method may be called after owner destruction.
 class HapbeatPlayback {
  public:
   HapbeatPlayback() = default;
@@ -60,7 +61,6 @@ class HapbeatPlayback {
   Hapbeat* _hub = nullptr;
   uint8_t _slot = 0;
   uint16_t _id = 0;
-  uint64_t _ownerGeneration = 0;
   uint64_t _generation = 0;
   float _gain = 1.0f;
   float _pan = 0.0f;
@@ -76,13 +76,6 @@ class Hapbeat {
   using Playback = HapbeatPlayback;
   using PlaybackStatus = HapbeatPlaybackStatus;
   using DeferredReason = HapbeatDeferredReason;
-
-  Hapbeat();
-  ~Hapbeat();
-  Hapbeat(const Hapbeat&) = delete;
-  Hapbeat& operator=(const Hapbeat&) = delete;
-  Hapbeat(Hapbeat&&) = delete;
-  Hapbeat& operator=(Hapbeat&&) = delete;
 
   // Open the UDP socket for sending. appName (<=16 chars) shows on the device
   // OLED while connected. Call after Wi-Fi is connected.
@@ -147,7 +140,6 @@ class Hapbeat {
   static const uint8_t MAX_STREAM_SOURCES = 8;
   static const uint8_t MAX_STREAM_SESSIONS = 8;
   static const uint8_t MAX_END_RECORDS = 8;
-  static const uint8_t MAX_OWNER_TOKENS = 16;
   static const uint16_t STREAM_SAMPLE_RATE = 16000;
   static const uint8_t STREAM_CHANNELS = 2;
   static const uint16_t STREAM_CHUNK_FRAMES = 256;
@@ -216,15 +208,6 @@ class Hapbeat {
   KnownDevice _devices[MAX_DEVICES];
   uint32_t _deviceTimeoutMs = 15000;
   uint64_t _lastPollMs = 0;
-  struct OwnerToken {
-    Hapbeat* owner = nullptr;
-    uint64_t generation = 0;
-    bool used = false;
-  };
-  static OwnerToken _ownerTokens[MAX_OWNER_TOKENS];
-  static uint64_t _nextOwnerToken;
-  uint64_t _ownerGeneration = 0;
-  bool _ownerRegistered = false;
   mutable uint32_t _lastMillisRaw = 0;
   mutable uint64_t _extendedMillis = 0;
   mutable bool _clockInitialized = false;
@@ -263,9 +246,6 @@ class Hapbeat {
   uint8_t aliveCount() const;
 
   uint64_t extendedMillis() const;
-  bool registerOwner();
-  void unregisterOwner();
-  static bool ownerAlive(const Hapbeat* owner, uint64_t generation);
   void reconcileStreams(uint64_t now);
   void pumpStreams(uint64_t now);
   bool sendStreamBegin(StreamSession& session);

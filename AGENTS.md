@@ -108,9 +108,14 @@ segment, a short target front-matches. So `"player_1/pos_neck"` and
 - Commands may fall back to broadcast while no destination is known. Stream
   handles become `Deferred(NoResolvedEndpoint)` until a full endpoint resolves;
   handles do not retain their owner, so keep `Hapbeat` alive while using them;
-  after owner destruction `valid()` is false and handle methods do not dereference it;
+  the owner must outlive each handle and no handle method may be called after
+  owner destruction;
   `setBroadcastOnly(true)` never changes stream routing. Empty sessions linger
   310 ms before `STREAM_END`, followed by a 310 ms cooldown before a new BEGIN.
+
+`Hapbeat` is not thread-safe. Synchronize callers that share one instance;
+independent instances have independent stream state and do not require shared
+locking.
 
 ## Wire format / interop
 
