@@ -83,7 +83,7 @@ void drawScreen() {
 }
 
 int g_holdBtn = -1;  // index of the button currently driving a hold stream (C)
-Hapbeat::Playback* g_holdPlayback = nullptr;
+Hapbeat::Playback g_holdPlayback;
 
 // A / B: one-shot (fires once per tap; B blocks ~500 ms while streaming).
 void fireOneshot(int i) {
@@ -109,8 +109,8 @@ void startHold(int i) {
 
 void stopHold() {
   if (g_holdBtn < 0) return;
-  if (g_wifi_ok && g_holdPlayback) g_holdPlayback->stop();
-  g_holdPlayback = nullptr;
+  if (g_wifi_ok && g_holdPlayback.valid()) g_holdPlayback.stop();
+  g_holdPlayback = Hapbeat::Playback();
   drawButton(g_holdBtn, false);
   g_holdBtn = -1;
 }

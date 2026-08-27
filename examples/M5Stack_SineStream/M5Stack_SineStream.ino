@@ -35,7 +35,7 @@ Hapbeat hb;
 
 enum Playing { NONE, TIMED_A, TIMED_B, HELD_C };
 Playing playing = NONE;
-Hapbeat::Playback* currentPlayback = nullptr;
+Hapbeat::Playback currentPlayback;
 uint32_t stopAtMs = 0;
 uint32_t lastPingMs = 0;
 uint8_t shownDevices = 0xFF;   // forces the first draw
@@ -118,7 +118,7 @@ void startTone(Playing which, float freqHz, uint32_t durationMs) {
   // putting it ahead of playSineSource() would add exactly that much latency between
   // the press and the buzz -- which is audible. It is safe to draw afterwards
   // because playSineSource() registers the source before the redraw.
-  if (currentPlayback) currentPlayback->stop();
+  if (currentPlayback.valid()) currentPlayback.stop();
   currentPlayback = hb.playSineSource(freqHz, INTENSITY, durationMs, "", 0.0f,
                                       durationMs == 0);
   stopAtMs = durationMs ? millis() + durationMs : 0;  // 0 = until released
@@ -128,8 +128,8 @@ void startTone(Playing which, float freqHz, uint32_t durationMs) {
 }
 
 void stopTone() {
-  if (currentPlayback) currentPlayback->stop();
-  currentPlayback = nullptr;
+  if (currentPlayback.valid()) currentPlayback.stop();
+  currentPlayback = Hapbeat::Playback();
   playing = NONE;
   stopAtMs = 0;
 }

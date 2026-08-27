@@ -25,15 +25,14 @@ enum class HapbeatDeferredReason : uint8_t {
   NoResolvedEndpoint,
 };
 
-// Handle for one logical synthesized-sine source. It lives in a fixed registry
-// entry and carries a generation token, so source-slot recycling cannot
-// retarget an older handle.
+// Handle for one logical synthesized-sine source. It is a small value carrying
+// a generation token, so source-slot recycling cannot retarget an older handle.
 class HapbeatPlayback {
  public:
   HapbeatPlayback() = default;
   uint16_t id() const { return _id; }
   bool valid() const {
-    return _allocated && _hub != nullptr && _id != 0 && _generation != 0;
+    return _hub != nullptr && _id != 0 && _generation != 0;
   }
   HapbeatPlaybackStatus status() const;
   HapbeatDeferredReason deferredReason() const;
@@ -57,7 +56,6 @@ class HapbeatPlayback {
   uint8_t _slot = 0;
   uint16_t _id = 0;
   uint64_t _generation = 0;
-  bool _allocated = false;
   float _gain = 1.0f;
   float _pan = 0.0f;
   bool _loop = false;
@@ -106,13 +104,13 @@ class Hapbeat {
   void setBroadcastOnly(bool on) { _broadcastOnly = on; }
 
   // Register a synthesized sine source and return its independently controllable
-  // handle. durationMs == 0 means open-ended; loop repeats a finite source.
+  // value handle. durationMs == 0 means open-ended; loop repeats a finite source.
   // The source is generated as 16 kHz mono and mixed as canonical 16 kHz stereo
   // PCM16 by the endpoint session. Call tick() frequently from loop().
-  Playback* playSineSource(float freqHz, float intensity,
-                           uint32_t durationMs = 0,
-                           const char* target = "", float pan = 0.0f,
-                           bool loop = false);
+  Playback playSineSource(float freqHz, float intensity,
+                          uint32_t durationMs = 0,
+                          const char* target = "", float pan = 0.0f,
+                          bool loop = false);
 
   // Blocking convenience wrapper. It registers through the same source pool and
   // StreamHub state machine as playSineSource().
@@ -134,7 +132,6 @@ class Hapbeat {
   static const uint8_t MAX_STREAM_SOURCES = 8;
   static const uint8_t MAX_STREAM_SESSIONS = 8;
   static const uint8_t MAX_END_RECORDS = 8;
-  static const uint8_t MAX_PLAYBACK_HANDLES = 32;
   static const uint16_t STREAM_SAMPLE_RATE = 16000;
   static const uint8_t STREAM_CHANNELS = 2;
   static const uint16_t STREAM_CHUNK_FRAMES = 256;
@@ -145,7 +142,7 @@ class Hapbeat {
   struct KnownDevice {
     IPAddress ip{(uint32_t)0};
     uint16_t port = 7700;
-    uint32_t lastPongMs = 0;
+    uint64_t lastPongMs = 0;
     bool pinned = false;
     uint8_t fails = 0;
     bool used = false;
@@ -164,7 +161,7 @@ class Hapbeat {
     uint64_t generation = 0;
     uint32_t phaseStep = 0;
     int16_t amplitude = 0;
-    uint32_t totalFrames = 0;
+    uint64_t totalFrames = 0;
     char target[hapbeat::MAX_DEVICE_ADDRESS_LEN + 1] = {0};
     HapbeatPlaybackStatus status = HapbeatPlaybackStatus::Stopped;
     HapbeatDeferredReason reason = HapbeatDeferredReason::None;
@@ -179,18 +176,18 @@ class Hapbeat {
     bool beginSent = false;
     bool attached[MAX_STREAM_SOURCES] = {false};
     bool completed[MAX_STREAM_SOURCES] = {false};
-    uint32_t cursors[MAX_STREAM_SOURCES] = {0};
+    uint64_t cursors[MAX_STREAM_SOURCES] = {0};
     uint32_t byteOffset = 0;
     uint64_t framesSent = 0;
-    uint32_t startedMs = 0;
-    uint32_t emptySinceMs = 0;
+    uint64_t startedMs = 0;
+    uint64_t emptySinceMs = 0;
     bool empty = false;
   };
 
   struct EndRecord {
     bool used = false;
     StreamEndpoint endpoint;
-    uint32_t endedMs = 0;
+    uint64_t endedMs = 0;
   };
 
   WiFiUDP _udp;
@@ -202,14 +199,16 @@ class Hapbeat {
   bool _ready = false;
   KnownDevice _devices[MAX_DEVICES];
   uint32_t _deviceTimeoutMs = 15000;
-  uint32_t _lastPollMs = 0;
+  uint64_t _lastPollMs = 0;
+  mutable uint32_t _lastMillisRaw = 0;
+  mutable uint64_t _extendedMillis = 0;
+  mutable bool _clockInitialized = false;
   bool _broadcastOnly = false;
   char _appName[hapbeat::MAX_APP_NAME_LEN + 1] = {0};
 
   SineSource _sources[MAX_STREAM_SOURCES];
   StreamSession _sessions[MAX_STREAM_SESSIONS];
   EndRecord _endRecords[MAX_END_RECORDS];
-  HapbeatPlayback _playbacks[MAX_PLAYBACK_HANDLES];
 
   uint16_t nextSeq() { return ++_seq; }
   uint16_t nextPlaybackId() {
@@ -238,8 +237,9 @@ class Hapbeat {
   bool isAlive(const KnownDevice& d) const;
   uint8_t aliveCount() const;
 
-  void reconcileStreams(uint32_t now);
-  void pumpStreams(uint32_t now);
+  uint64_t extendedMillis() const;
+  void reconcileStreams(uint64_t now);
+  void pumpStreams(uint64_t now);
   bool sendStreamBegin(StreamSession& session);
   void stopSource(uint8_t slot, uint16_t id, uint64_t generation);
   void setSourceGain(uint8_t slot, uint16_t id, uint64_t generation,
@@ -260,8 +260,8 @@ class Hapbeat {
   int8_t findSession(const StreamEndpoint& endpoint) const;
   bool sourceMatches(const SineSource& source,
                     const StreamEndpoint& endpoint) const;
-  bool endpointCoolingDown(const StreamEndpoint& endpoint, uint32_t now) const;
-  void recordEnd(const StreamEndpoint& endpoint, uint32_t now);
+  bool endpointCoolingDown(const StreamEndpoint& endpoint, uint64_t now) const;
+  void recordEnd(const StreamEndpoint& endpoint, uint64_t now);
   void removeSession(uint8_t slot);
   bool sourceCompletedEverywhere(uint8_t sourceSlot,
                                  const StreamEndpoint* endpoints,

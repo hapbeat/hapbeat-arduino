@@ -35,7 +35,7 @@ const uint32_t PHASE_MS = 5000;   // long enough to hear, short enough to compar
 
 Hapbeat hb;
 bool broadcastPhase = true;     // command routing only; streams stay unicast
-Hapbeat::Playback* playback = nullptr;
+Hapbeat::Playback playback;
 uint32_t phaseStartMs = 0;
 uint32_t lastPingMs = 0;
 uint32_t lastScreenMs = 0;
@@ -111,7 +111,7 @@ void startPhase() {
 #ifdef HB_HAS_SCREEN
   drawPhase(devices, ips);
 #endif
-  if (!playback)
+  if (!playback.valid())
     playback = hb.playSineSource(TONE_HZ, INTENSITY, 0, "", 0.0f, true);
   phaseStartMs = millis();
 }

@@ -53,7 +53,6 @@ void HapbeatPlayback::reset(Hapbeat* hub, uint8_t slot, uint16_t id,
   _slot = slot;
   _id = id;
   _generation = generation;
-  _allocated = true;
   _gain = gain;
   _pan = pan;
   _loop = loop;
@@ -87,6 +86,19 @@ void HapbeatPlayback::setLoop(bool value) {
 void HapbeatPlayback::stop() {
   if (!_hub || status() == HapbeatPlaybackStatus::Stopped) return;
   _hub->stopSource(_slot, _id, _generation);
+}
+
+uint64_t Hapbeat::extendedMillis() const {
+  const uint32_t raw = millis();
+  if (!_clockInitialized) {
+    _lastMillisRaw = raw;
+    _extendedMillis = raw;
+    _clockInitialized = true;
+  } else {
+    _extendedMillis += (uint32_t)(raw - _lastMillisRaw);
+    _lastMillisRaw = raw;
+  }
+  return _extendedMillis;
 }
 
 bool Hapbeat::begin(uint16_t port, const char* appName) {
@@ -158,7 +170,7 @@ bool Hapbeat::sendStreamTo(const uint8_t* buf, size_t len,
 bool Hapbeat::isAlive(const KnownDevice& device) const {
   if (!device.used || (uint32_t)device.ip == 0) return false;
   if (device.pinned) return true;
-  return (millis() - device.lastPongMs) < _deviceTimeoutMs;
+  return (extendedMillis() - device.lastPongMs) < _deviceTimeoutMs;
 }
 
 uint8_t Hapbeat::aliveCount() const {
@@ -173,11 +185,11 @@ void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
   if ((uint32_t)ip == 0) return;
   if (port == 0) port = _port;
   const bool hasAddress = address && address[0];
-  const uint32_t now = millis();
+  const uint64_t now = extendedMillis();
   int8_t slot = -1;
   int8_t freeSlot = -1;
   int8_t oldest = -1;
-  uint32_t oldestAge = 0;
+  uint64_t oldestAge = 0;
 
   // The exact (IP, port, full address) tuple is the endpoint identity. A full
   // address may legitimately be reported by multiple IP routes, so address
@@ -216,7 +228,7 @@ void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
     if (slot < 0 && !device.used) freeSlot = i;
     if (slot < 0 && device.used && !isAlive(device)) freeSlot = i;
     if (slot < 0 && device.used && !device.pinned) {
-      const uint32_t age = now - device.lastPongMs;
+      const uint64_t age = now - device.lastPongMs;
       if (oldest < 0 || age > oldestAge) {
         oldest = i;
         oldestAge = age;
@@ -268,7 +280,7 @@ void Hapbeat::pollPongs() {
 }
 
 void Hapbeat::pollPongsThrottled() {
-  const uint32_t now = millis();
+  const uint64_t now = extendedMillis();
   if (now - _lastPollMs < 100) return;
   _lastPollMs = now;
   pollPongs();
@@ -276,7 +288,7 @@ void Hapbeat::pollPongsThrottled() {
 
 void Hapbeat::poll() {
   pollPongs();
-  if (_ready) reconcileStreams(millis());
+  if (_ready) reconcileStreams(extendedMillis());
 }
 
 uint8_t Hapbeat::deviceCount() {
@@ -312,13 +324,13 @@ void Hapbeat::setDeviceIp(IPAddress ip) {
 bool Hapbeat::discover(uint32_t timeoutMs) {
   if (!_ready) return false;
   ping();
-  const uint32_t start = millis();
-  while (millis() - start < timeoutMs) {
+  const uint64_t start = extendedMillis();
+  while (extendedMillis() - start < timeoutMs) {
     pollPongs();
     delay(5);
   }
   pollPongs();
-  reconcileStreams(millis());
+  reconcileStreams(extendedMillis());
   return aliveCount() > 0;
 }
 
@@ -344,7 +356,7 @@ void Hapbeat::stopAll(const char* target) {
 void Hapbeat::ping() {
   uint8_t packet[16];
   const size_t length = hapbeat::buildPing(packet, sizeof(packet), nextSeq(),
-                                           (int64_t)millis() * 1000);
+                                           (int64_t)extendedMillis() * 1000);
   sendPacket(packet, length);  // discovery remains broadcast
   if (_broadcastOnly) return;
   for (uint8_t i = 0; i < MAX_DEVICES; ++i)
@@ -363,14 +375,14 @@ void Hapbeat::end() {
   _ready = false;
 }
 
-HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
+Hapbeat::Playback Hapbeat::playSineSource(float freqHz, float intensity,
                                           uint32_t durationMs,
                                           const char* target, float pan,
                                           bool loop) {
-  if (!_ready) return nullptr;
+  if (!_ready) return Playback();
   const char* targetValue = target ? target : "";
   const size_t targetLength = strlen(targetValue);
-  if (targetLength > hapbeat::MAX_DEVICE_ADDRESS_LEN) return nullptr;
+  if (targetLength > hapbeat::MAX_DEVICE_ADDRESS_LEN) return Playback();
 
   uint8_t slot = MAX_STREAM_SOURCES;
   for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
@@ -379,16 +391,7 @@ HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
       break;
     }
   }
-  if (slot == MAX_STREAM_SOURCES) return nullptr;
-
-  uint8_t handleSlot = MAX_PLAYBACK_HANDLES;
-  for (uint8_t i = 0; i < MAX_PLAYBACK_HANDLES; ++i) {
-    if (!_playbacks[i]._allocated) {
-      handleSlot = i;
-      break;
-    }
-  }
-  if (handleSlot == MAX_PLAYBACK_HANDLES) return nullptr;
+  if (slot == MAX_STREAM_SOURCES) return Playback();
 
   SineSource& source = _sources[slot];
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
@@ -410,7 +413,7 @@ HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
     source.totalFrames = 0;  // open-ended source
   } else {
     const uint64_t frames = (uint64_t)durationMs * STREAM_SAMPLE_RATE / 1000;
-    source.totalFrames = frames == 0 ? 1 : (uint32_t)frames;
+    source.totalFrames = frames == 0 ? 1 : frames;
   }
   memcpy(source.target, targetValue, targetLength + 1);
   source.gain = clampFloat(intensity, 0.0f, 1.0f);
@@ -418,35 +421,31 @@ HapbeatPlayback* Hapbeat::playSineSource(float freqHz, float intensity,
   source.loop = loop;
   source.status = HapbeatPlaybackStatus::Deferred;
   source.reason = HapbeatDeferredReason::NoResolvedEndpoint;
-  reconcileStreams(millis());
-  _playbacks[handleSlot].reset(this, slot, source.id, source.generation,
-                               source.gain, source.pan, source.loop);
-  return &_playbacks[handleSlot];
+  reconcileStreams(extendedMillis());
+  Playback playback;
+  playback.reset(this, slot, source.id, source.generation, source.gain,
+                 source.pan, source.loop);
+  return playback;
 }
 
 void Hapbeat::playSine(float freqHz, float intensity, uint32_t durationMs,
                        const char* target) {
-  Playback* playback =
+  Playback playback =
       playSineSource(freqHz, intensity, durationMs, target, 0.0f, false);
-  if (!playback) return;
-  const uint32_t start = millis();
-  while (millis() - start < durationMs) {
+  if (!playback.valid()) return;
+  const uint64_t start = extendedMillis();
+  while (extendedMillis() - start < durationMs) {
     tick();
     delay(2);
   }
-  playback->stop();
+  playback.stop();
   tick();
-  // This internal convenience call does not expose its handle. Reclaim its
-  // registry entry so repeated blocking plays do not consume the fixed handle
-  // registry; externally returned handles remain generation-stable forever.
-  playback->_allocated = false;
-  playback->_hub = nullptr;
 }
 
 void Hapbeat::tick() {
   if (!_ready) return;
   pollPongs();
-  const uint32_t now = millis();
+  const uint64_t now = extendedMillis();
   reconcileStreams(now);
   pumpStreams(now);
 }
@@ -514,7 +513,7 @@ bool Hapbeat::sourceMatches(const SineSource& source,
 }
 
 bool Hapbeat::endpointCoolingDown(const StreamEndpoint& endpoint,
-                                  uint32_t now) const {
+                                  uint64_t now) const {
   for (uint8_t i = 0; i < MAX_END_RECORDS; ++i) {
     const EndRecord& record = _endRecords[i];
     if (!record.used) continue;
@@ -525,10 +524,10 @@ bool Hapbeat::endpointCoolingDown(const StreamEndpoint& endpoint,
   return false;
 }
 
-void Hapbeat::recordEnd(const StreamEndpoint& endpoint, uint32_t now) {
+void Hapbeat::recordEnd(const StreamEndpoint& endpoint, uint64_t now) {
   int8_t slot = -1;
   int8_t oldest = -1;
-  uint32_t oldestAge = 0;
+  uint64_t oldestAge = 0;
   for (uint8_t i = 0; i < MAX_END_RECORDS; ++i) {
     EndRecord& record = _endRecords[i];
     if (!record.used) {
@@ -539,7 +538,7 @@ void Hapbeat::recordEnd(const StreamEndpoint& endpoint, uint32_t now) {
       slot = i;
       break;
     }
-    const uint32_t age = now - record.endedMs;
+    const uint64_t age = now - record.endedMs;
     if (oldest < 0 || age > oldestAge) {
       oldest = i;
       oldestAge = age;
@@ -591,58 +590,107 @@ void Hapbeat::completeFinishedSources(const StreamEndpoint* endpoints,
   }
 }
 
-void Hapbeat::reconcileStreams(uint32_t now) {
+void Hapbeat::reconcileStreams(uint64_t now) {
   if (!_ready) return;
   StreamEndpoint endpoints[MAX_DEVICES];
   const uint8_t endpointCount = collectStreamEndpoints(endpoints, MAX_DEVICES);
   bool claimed[MAX_DEVICES] = {false};
+  bool sessionClaimed[MAX_STREAM_SESSIONS] = {false};
 
-  // Keep exact sessions first. A route/address migration then gets one
-  // unambiguous replacement and retains cursor + byte offset.
+  // Claim every exact endpoint before considering migration. This global
+  // first pass prevents a lower session slot from consuming an endpoint that
+  // belongs to an exact higher-slot session.
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
-    StreamSession& session = _sessions[s];
-    if (!session.used) continue;
-    int8_t exact = -1;
+    if (!_sessions[s].used) continue;
     for (uint8_t e = 0; e < endpointCount; ++e) {
-      if (!claimed[e] && sameEndpoint(session.endpoint, endpoints[e])) {
-        exact = e;
-        break;
-      }
+      if (claimed[e] || !sameEndpoint(_sessions[s].endpoint, endpoints[e]))
+        continue;
+      _sessions[s].endpoint = endpoints[e];
+      claimed[e] = true;
+      sessionClaimed[s] = true;
+      break;
     }
-    if (exact >= 0) {
-      session.endpoint = endpoints[exact];
-      claimed[exact] = true;
-      continue;
-    }
+  }
 
-    // A same-IP/port route is the unambiguous migration seam. Only when that
-    // seam is absent may the full address be considered, and only if that
-    // address maps to one endpoint. This keeps same-address multi-route
-    // devices as separate sessions.
-    int8_t candidate = -1;
-    uint8_t candidateCount = 0;
+  // A same-IP/port route is the explicit migration seam. Compute all route
+  // candidates first and accept only one-to-one edges, independent of session
+  // slot order.
+  uint8_t routeCandidate[MAX_STREAM_SESSIONS] = {0};
+  uint8_t routeCount[MAX_STREAM_SESSIONS] = {0};
+  uint8_t routeAvailableCount[MAX_STREAM_SESSIONS] = {0};
+  uint8_t routeEndpointCount[MAX_DEVICES] = {0};
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    if (!_sessions[s].used || sessionClaimed[s]) continue;
     for (uint8_t e = 0; e < endpointCount; ++e) {
-      if (claimed[e]) continue;
-      if (sameIpPort(session.endpoint, endpoints[e])) {
-        candidate = e;
-        ++candidateCount;
+      if (!sameIpPort(_sessions[s].endpoint, endpoints[e])) continue;
+      ++routeCount[s];
+      if (!claimed[e]) {
+        routeCandidate[s] = e;
+        ++routeAvailableCount[s];
       }
     }
-    if (candidateCount == 0) {
-      for (uint8_t e = 0; e < endpointCount; ++e) {
-        if (claimed[e]) continue;
-        if (strcmp(session.endpoint.address, endpoints[e].address) == 0) {
-          candidate = e;
-          ++candidateCount;
-        }
+  }
+  for (uint8_t e = 0; e < endpointCount; ++e) {
+    if (claimed[e]) continue;
+    for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s)
+      if (_sessions[s].used && !sessionClaimed[s] && routeCount[s] == 1 &&
+          routeAvailableCount[s] == 1 &&
+          routeCandidate[s] == e)
+        ++routeEndpointCount[e];
+  }
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    if (!_sessions[s].used || sessionClaimed[s] || routeCount[s] != 1 ||
+        routeAvailableCount[s] != 1)
+      continue;
+    const uint8_t e = routeCandidate[s];
+    if (claimed[e] || routeEndpointCount[e] != 1) continue;
+    _sessions[s].endpoint = endpoints[e];
+    claimed[e] = true;
+    sessionClaimed[s] = true;
+  }
+
+  // Address-only migration is allowed only for one old session and one new
+  // endpoint. Ambiguous stale/live sessions (including same-address devices
+  // on different IPs) are never given a cursor-preserving migration.
+  uint8_t addressCandidate[MAX_STREAM_SESSIONS] = {0};
+  uint8_t addressCount[MAX_STREAM_SESSIONS] = {0};
+  uint8_t addressAvailableCount[MAX_STREAM_SESSIONS] = {0};
+  uint8_t addressEndpointCount[MAX_DEVICES] = {0};
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    if (!_sessions[s].used || sessionClaimed[s] || routeCount[s] != 0)
+      continue;
+    for (uint8_t e = 0; e < endpointCount; ++e) {
+      if (strcmp(_sessions[s].endpoint.address, endpoints[e].address) != 0)
+        continue;
+      ++addressCount[s];
+      if (!claimed[e]) {
+        addressCandidate[s] = e;
+        ++addressAvailableCount[s];
       }
     }
-    if (candidateCount == 1) {
-      session.endpoint = endpoints[candidate];
-      claimed[candidate] = true;
-    } else {
-      // A vanished endpoint is forgotten without END. If it later returns it
-      // is a new session and finite sources begin at frame zero.
+  }
+  for (uint8_t e = 0; e < endpointCount; ++e) {
+    if (claimed[e]) continue;
+    for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s)
+      if (_sessions[s].used && !sessionClaimed[s] && addressCount[s] == 1 &&
+          addressAvailableCount[s] == 1 && addressCandidate[s] == e)
+        ++addressEndpointCount[e];
+  }
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    if (!_sessions[s].used || sessionClaimed[s] || addressCount[s] != 1 ||
+        addressAvailableCount[s] != 1)
+      continue;
+    const uint8_t e = addressCandidate[s];
+    if (claimed[e] || addressEndpointCount[e] != 1) continue;
+    _sessions[s].endpoint = endpoints[e];
+    claimed[e] = true;
+    sessionClaimed[s] = true;
+  }
+
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    if (_sessions[s].used && !sessionClaimed[s]) {
+      // A vanished or ambiguous endpoint is forgotten without END. If it
+      // later returns it is a new session and finite sources begin at frame 0.
       removeSession(s);
     }
   }
@@ -713,7 +761,7 @@ void Hapbeat::reconcileStreams(uint32_t now) {
                   : 0;
           const uint64_t baselineMs =
               (bufferedFrames * 1000) / STREAM_SAMPLE_RATE;
-          session.startedMs = now - (uint32_t)baselineMs;
+          session.startedMs = now - baselineMs;
         }
         session.cursors[i] = 0;  // every new endpoint starts the source at zero
         session.attached[i] = true;
@@ -738,7 +786,7 @@ void Hapbeat::mixSession(StreamSession& session, uint16_t frames,
   for (uint8_t sourceSlot = 0; sourceSlot < MAX_STREAM_SOURCES; ++sourceSlot) {
     if (!session.attached[sourceSlot] || !_sources[sourceSlot].used) continue;
     SineSource& source = _sources[sourceSlot];
-    uint32_t cursor = session.cursors[sourceSlot];
+    uint64_t cursor = session.cursors[sourceSlot];
     const float pan = source.pan;
     const float gain = source.gain;
     const float leftGain = gain * (pan <= 0.0f ? 1.0f : 1.0f - pan);
@@ -786,7 +834,7 @@ void Hapbeat::mixSession(StreamSession& session, uint16_t frames,
                                  packet + hapbeat::HEADER_SIZE + 4, audioLength);
 }
 
-void Hapbeat::pumpStreams(uint32_t now) {
+void Hapbeat::pumpStreams(uint64_t now) {
   uint8_t packet[hapbeat::HEADER_SIZE + 4 + STREAM_CHUNK_FRAMES * 4];
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
     StreamSession& session = _sessions[s];
@@ -817,13 +865,13 @@ void Hapbeat::pumpStreams(uint32_t now) {
         break;
       }
       if (session.cursors[i] < source.totalFrames) {
-        const uint32_t remaining = source.totalFrames - session.cursors[i];
+        const uint64_t remaining = source.totalFrames - session.cursors[i];
         if (remaining > maximum)
           maximum = remaining > STREAM_CHUNK_FRAMES ? STREAM_CHUNK_FRAMES
                                                     : (uint16_t)remaining;
       }
     }
-    const uint32_t elapsedMs = now - session.startedMs;
+    const uint64_t elapsedMs = now - session.startedMs;
     const uint64_t wanted =
         ((uint64_t)elapsedMs * STREAM_SAMPLE_RATE) / 1000 +
         STREAM_SEND_AHEAD_FRAMES;
@@ -839,7 +887,7 @@ void Hapbeat::pumpStreams(uint32_t now) {
           break;
         }
         if (session.cursors[i] < source.totalFrames) {
-          const uint32_t remaining = source.totalFrames - session.cursors[i];
+          const uint64_t remaining = source.totalFrames - session.cursors[i];
           const uint16_t available = remaining > STREAM_CHUNK_FRAMES
                                          ? STREAM_CHUNK_FRAMES
                                          : (uint16_t)remaining;
@@ -849,7 +897,7 @@ void Hapbeat::pumpStreams(uint32_t now) {
       if (maximum == 0) break;
       if (maximum > STREAM_CHUNK_FRAMES) maximum = STREAM_CHUNK_FRAMES;
 
-      uint32_t oldCursors[MAX_STREAM_SOURCES];
+      uint64_t oldCursors[MAX_STREAM_SOURCES];
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
         oldCursors[i] = session.cursors[i];
       uint8_t finishedMask = 0;
@@ -900,7 +948,7 @@ void Hapbeat::stopSource(uint8_t slot, uint16_t id, uint64_t generation) {
   source.status = HapbeatPlaybackStatus::Stopped;
   source.reason = HapbeatDeferredReason::None;
   source.used = false;
-  const uint32_t now = millis();
+  const uint64_t now = extendedMillis();
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
     StreamSession& session = _sessions[s];
     if (!session.used || !session.attached[slot]) continue;
@@ -935,7 +983,7 @@ void Hapbeat::setSourceLoop(uint8_t slot, uint16_t id, uint64_t generation,
   if (value) {
     for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s)
       _sessions[s].completed[slot] = false;
-    reconcileStreams(millis());
+    reconcileStreams(extendedMillis());
   }
 }
 
@@ -962,7 +1010,7 @@ void Hapbeat::clearAllSources(bool sendEnds) {
     _sources[i].reason = HapbeatDeferredReason::None;
     _sources[i].used = false;
   }
-  const uint32_t now = millis();
+  const uint64_t now = extendedMillis();
   for (uint8_t i = 0; i < MAX_STREAM_SESSIONS; ++i) {
     StreamSession& session = _sessions[i];
     if (!session.used) continue;

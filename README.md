@@ -72,7 +72,7 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 | `begin(port = 7700, appName = "")` | open the UDP socket; announce app name |
 | `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event (gain 0..1; `pan` is the left/right balance, -1 = left only … 0 = centre … +1 = right only) |
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
-| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return its `Playback` handle |
+| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a value `Playback` handle |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
 | `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
 | `ping()` / `end()` | keep-alive probe / announce disconnect |

@@ -77,7 +77,7 @@ void loop() {
 | `poll()` / `deviceCount()` / `deviceIp()` | drain pending PONGs (optional; sends do it too) / live device count / first device |
 | `setDeviceIp(ip)` | pin a device by IP (never expires); `0.0.0.0` clears pinned entries |
 | `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | liveness window (default 15 s) / force command broadcast; streams still need a full PONG endpoint |
-| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return its `Playback` handle |
+| `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a value `Playback` handle |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
 | `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
 | `end()` | tell the device this app is leaving (clears the OLED app name) |

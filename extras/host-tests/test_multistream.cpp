@@ -75,13 +75,13 @@ static void test_routing_and_mixing() {
   hb.poll();
   assert(hb.deviceCount() == 2);
 
-  Hapbeat::Playback* left = hb.playSineSource(
+  Hapbeat::Playback left = hb.playSineSource(
       4000.0f, 1.0f, 0, "player_1/left", -1.0f, true);
-  Hapbeat::Playback* both = hb.playSineSource(
+  Hapbeat::Playback both = hb.playSineSource(
       4000.0f, 1.0f, 0, "player_1/*", -1.0f, true);
-  assert(left && both);
-  assert(left->status() == HapbeatPlaybackStatus::Active);
-  assert(both->status() == HapbeatPlaybackStatus::Active);
+  assert(left.valid() && both.valid());
+  assert(left.status() == HapbeatPlaybackStatus::Active);
+  assert(both.status() == HapbeatPlaybackStatus::Active);
   size_t beginLeft = 0;
   size_t beginRight = 0;
   for (const WiFiUDP::Sent& sent : WiFiUDP::sent) {
@@ -118,12 +118,12 @@ static void test_routing_and_mixing() {
     assert(read16(sent.data, 12 + 4 + 2) == 0);
     break;
   }
-  left->stop();
-  assert(left->isStopped());
-  assert(both->isActive());
-  both->stop();
+  left.stop();
+  assert(left.isStopped());
+  assert(both.isActive());
+  both.stop();
   hb.tick();
-  assert(both->isStopped());
+  assert(both.isStopped());
 }
 
 static void test_same_address_different_ip_are_distinct() {
@@ -138,9 +138,9 @@ static void test_same_address_different_ip_are_distinct() {
   hb.poll();
   assert(hb.deviceCount() == 2);
 
-  Hapbeat::Playback* playback =
+  Hapbeat::Playback playback =
       hb.playSineSource(160.0f, 0.5f, 0, "player_4/chest", 0.0f, true);
-  assert(playback && playback->status() == HapbeatPlaybackStatus::Active);
+  assert(playback.valid() && playback.status() == HapbeatPlaybackStatus::Active);
   assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 2);
   hb.tick();
   assert(countStreamTo(hapbeat::CMD_STREAM_DATA, first) > 0);
@@ -159,15 +159,15 @@ static void test_deferred_late_pong_and_cooldown() {
   Hapbeat hb;
   assert(hb.begin());
   hb.setDeviceIp(IPAddress(192, 0, 2, 20));
-  Hapbeat::Playback* pinned = hb.playSineSource(
+  Hapbeat::Playback pinned = hb.playSineSource(
       100.0f, 1.0f, 0, "player_2/chest", 0.0f, true);
-  assert(pinned && pinned->status() == HapbeatPlaybackStatus::Deferred);
+  assert(pinned.valid() && pinned.status() == HapbeatPlaybackStatus::Deferred);
   hb.tick();
   assert(WiFiUDP::sent.empty());
-  pinned->stop();
-  Hapbeat::Playback* deferred = hb.playSineSource(
+  pinned.stop();
+  Hapbeat::Playback deferred = hb.playSineSource(
       100.0f, 1.0f, 1000, "player_2/chest", 0.0f, false);
-  assert(deferred && deferred->status() == HapbeatPlaybackStatus::Deferred);
+  assert(deferred.valid() && deferred.status() == HapbeatPlaybackStatus::Deferred);
   hb.tick();
   assert(WiFiUDP::sent.empty());
 
@@ -175,7 +175,7 @@ static void test_deferred_late_pong_and_cooldown() {
                   pong("player_2/chest/group_1"));
   hb.tick();
   assert(hb.deviceCount() == 1);
-  assert(deferred->status() == HapbeatPlaybackStatus::Active);
+  assert(deferred.status() == HapbeatPlaybackStatus::Active);
   assert(!WiFiUDP::sent.empty());
   assert(WiFiUDP::sent[0].data[3] == hapbeat::CMD_STREAM_BEGIN);
   assert(WiFiUDP::sent[0].ip == IPAddress(192, 0, 2, 20));
@@ -190,15 +190,15 @@ static void test_deferred_late_pong_and_cooldown() {
     assert(WiFiUDP::sent[0].data[20 + i] == (uint8_t)expectedTarget[i]);
   assert(read16(WiFiUDP::sent[1].data, 8) == 0);
 
-  deferred->stop();
+  deferred.stop();
   hb.tick();
   hapbeat_host_now_ms += 310;
   hb.tick();
   assert(countStream(hapbeat::CMD_STREAM_END) == 1);
 
-  Hapbeat::Playback* cooled = hb.playSineSource(
+  Hapbeat::Playback cooled = hb.playSineSource(
       100.0f, 1.0f, 0, "player_2/chest", 0.0f, true);
-  assert(cooled && cooled->status() == HapbeatPlaybackStatus::Deferred);
+  assert(cooled.valid() && cooled.status() == HapbeatPlaybackStatus::Deferred);
   hb.tick();
   assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 1);
   hapbeat_host_now_ms += 310;
@@ -215,15 +215,15 @@ static void test_begin_retry_and_source_pool_exhaustion() {
                   pong("player_5/chest/group_1"));
   hb.poll();
   WiFiUDP::failEndPackets = 1;
-  Hapbeat::Playback* playback = hb.playSineSource(
+  Hapbeat::Playback playback = hb.playSineSource(
       100.0f, 1.0f, 0, "player_5/chest", 0.0f, true);
-  assert(playback && playback->status() == HapbeatPlaybackStatus::Deferred);
-  assert(playback->deferredReason() == HapbeatDeferredReason::NoResolvedEndpoint);
+  assert(playback.valid() && playback.status() == HapbeatPlaybackStatus::Deferred);
+  assert(playback.deferredReason() == HapbeatDeferredReason::NoResolvedEndpoint);
   assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 1);
   assert(countStream(hapbeat::CMD_STREAM_DATA) == 0);
   hb.tick();
-  assert(playback->status() == HapbeatPlaybackStatus::Active);
-  assert(playback->deferredReason() == HapbeatDeferredReason::None);
+  assert(playback.status() == HapbeatPlaybackStatus::Active);
+  assert(playback.deferredReason() == HapbeatDeferredReason::None);
   assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 2);
   assert(countStream(hapbeat::CMD_STREAM_DATA) > 0);
 
@@ -233,24 +233,24 @@ static void test_begin_retry_and_source_pool_exhaustion() {
   WiFiUDP::inject(IPAddress(192, 0, 2, 51), 7700,
                   pong("player_5/generation/group_1"));
   generationHub.poll();
-  Hapbeat::Playback* old = generationHub.playSineSource(
+  Hapbeat::Playback old = generationHub.playSineSource(
       100.0f, 0.25f, 0, "player_5/generation", 0.0f, true);
-  assert(old && old->isActive());
-  const uint16_t oldId = old->id();
-  old->stop();
-  Hapbeat::Playback* replacement = generationHub.playSineSource(
+  assert(old.valid() && old.isActive());
+  const uint16_t oldId = old.id();
+  old.stop();
+  Hapbeat::Playback replacement = generationHub.playSineSource(
       100.0f, 0.75f, 0, "player_5/generation", 0.0f, true);
-  assert(old && replacement);
-  assert(old->id() == oldId && old->id() != replacement->id());
-  assert(old->status() == HapbeatPlaybackStatus::Stopped);
-  old->setGain(0.1f);
-  old->setPan(-1.0f);
-  old->setLoop(false);
-  old->stop();
-  assert(replacement->status() == HapbeatPlaybackStatus::Active);
-  assert(replacement->gain() == 0.75f);
-  assert(replacement->pan() == 0.0f);
-  assert(replacement->loop());
+  assert(old.valid() && replacement.valid());
+  assert(old.id() == oldId && old.id() != replacement.id());
+  assert(old.status() == HapbeatPlaybackStatus::Stopped);
+  old.setGain(0.1f);
+  old.setPan(-1.0f);
+  old.setLoop(false);
+  old.stop();
+  assert(replacement.status() == HapbeatPlaybackStatus::Active);
+  assert(replacement.gain() == 0.75f);
+  assert(replacement.pan() == 0.0f);
+  assert(replacement.loop());
   assert(generationHub._sources[0].gain == 0.75f);
   assert(generationHub._sources[0].pan == 0.0f);
   assert(generationHub._sources[0].loop);
@@ -258,21 +258,26 @@ static void test_begin_retry_and_source_pool_exhaustion() {
   // Fixed source-pool exhaustion is reported without heap allocation.
   Hapbeat poolHub;
   assert(poolHub.begin());
-  Hapbeat::Playback* handles[Hapbeat::MAX_STREAM_SOURCES] = {nullptr};
+  Hapbeat::Playback handles[Hapbeat::MAX_STREAM_SOURCES];
   for (uint8_t i = 0; i < Hapbeat::MAX_STREAM_SOURCES; ++i) {
     handles[i] = poolHub.playSineSource(100.0f, 1.0f, 0, "unresolved", 0.0f,
                                         true);
-    assert(handles[i]);
+    assert(handles[i].valid());
   }
-  Hapbeat::Playback* exhausted =
+  Hapbeat::Playback exhausted =
       poolHub.playSineSource(100.0f, 1.0f, 0, "unresolved", 0.0f, true);
-  assert(!exhausted);
+  assert(!exhausted.valid());
   for (uint8_t i = 0; i < Hapbeat::MAX_STREAM_SOURCES; ++i)
-    handles[i]->stop();
+    handles[i].stop();
 
-  // The blocking convenience does not expose a handle and can be reused.
-  for (uint8_t i = 0; i < Hapbeat::MAX_PLAYBACK_HANDLES + 4; ++i)
-    poolHub.playSine(100.0f, 1.0f, 1, "unresolved");
+  // Value handles do not occupy a registry; repeated source-slot reuse stays
+  // allocation-free and remains safe for every retired handle.
+  for (uint16_t i = 0; i < 400; ++i) {
+    Hapbeat::Playback sequential = poolHub.playSineSource(
+        100.0f, 1.0f, 0, "unresolved", 0.0f, true);
+    assert(sequential.valid());
+    sequential.stop();
+  }
 }
 
 static void test_route_migration_keeps_session() {
@@ -283,7 +288,7 @@ static void test_route_migration_keeps_session() {
   const IPAddress route(192, 0, 2, 30);
   WiFiUDP::inject(route, 7700, pong("player_3/chest/group_1"));
   hb.poll();
-  Hapbeat::Playback* playback = hb.playSineSource(
+  Hapbeat::Playback playback = hb.playSineSource(
       100.0f, 1.0f, 0, "player_3/chest", 0.0f, true);
   hb.tick();
   size_t begins = 0;
@@ -305,7 +310,7 @@ static void test_route_migration_keeps_session() {
       newOffset = read32(sent.data, 8);
     }
   }
-  assert(playback && playback->status() == HapbeatPlaybackStatus::Active);
+  assert(playback.valid() && playback.status() == HapbeatPlaybackStatus::Active);
   assert(begins == 1);
   assert(newOffset > oldOffset);
 }
@@ -320,7 +325,7 @@ static void test_route_identity_wins_over_address_sibling() {
   WiFiUDP::inject(route, 7700, pong("player_9/chest/group_1"));
   WiFiUDP::inject(sibling, 7701, pong("player_9/chest/group_2"));
   hb.poll();
-  Hapbeat::Playback* playback = hb.playSineSource(
+  Hapbeat::Playback playback = hb.playSineSource(
       100.0f, 1.0f, 0, "player_9/chest", 0.0f, true);
   hb.tick();
   const size_t beginsBefore = countStream(hapbeat::CMD_STREAM_BEGIN);
@@ -336,7 +341,7 @@ static void test_route_identity_wins_over_address_sibling() {
   WiFiUDP::inject(route, 7700, pong("player_9/chest/group_2"));
   hapbeat_host_now_ms += 20;
   hb.tick();
-  assert(playback && playback->isActive());
+  assert(playback.valid() && playback.isActive());
   assert(countStream(hapbeat::CMD_STREAM_BEGIN) == beginsBefore);
   uint32_t migratedOffset = 0;
   size_t routeData = 0;
@@ -353,6 +358,85 @@ static void test_route_identity_wins_over_address_sibling() {
   assert(migratedOffset > oldOffset);
 }
 
+static void test_exact_claim_precedes_ambiguous_migration() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  hb.setDeviceTimeout(10);
+  const IPAddress stale(192, 0, 2, 33);
+  const IPAddress live(192, 0, 2, 34);
+  const char* address = "player_10/chest/group_1";
+  WiFiUDP::inject(stale, 7700, pong(address));
+  WiFiUDP::inject(live, 7700, pong(address));
+  hb.poll();
+  Hapbeat::Playback playback =
+      hb.playSineSource(100.0f, 1.0f, 0, "player_10/chest", 0.0f, true);
+  hb.tick();
+  assert(playback.valid() && playback.isActive());
+  size_t initialBegins = countStream(hapbeat::CMD_STREAM_BEGIN);
+  assert(initialBegins == 2);
+  uint32_t oldLiveOffset = 0;
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent)
+    if (sent.ip == live && isStream(sent, hapbeat::CMD_STREAM_DATA))
+      oldLiveOffset = read32(sent.data, 8);
+
+  // The stale same-address session must not steal the live session's exact
+  // endpoint during migration. A global exact-claim pass keeps its cursor.
+  hapbeat_host_now_ms = 20;
+  WiFiUDP::inject(live, 7700, pong(address));
+  WiFiUDP::sent.clear();
+  hb.tick();
+  size_t usedSessions = 0;
+  for (uint8_t i = 0; i < Hapbeat::MAX_STREAM_SESSIONS; ++i)
+    if (hb._sessions[i].used) {
+      ++usedSessions;
+      assert(hb._sessions[i].endpoint.ip == live);
+    }
+  assert(usedSessions == 1);
+  assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 0);
+  uint32_t newLiveOffset = 0;
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent)
+    if (sent.ip == live && isStream(sent, hapbeat::CMD_STREAM_DATA))
+      newLiveOffset = read32(sent.data, 8);
+  assert(newLiveOffset > oldLiveOffset);
+}
+
+static void test_ambiguous_address_migration_starts_new_session() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  hb.setDeviceTimeout(10);
+  const IPAddress oldFirst(192, 0, 2, 35);
+  const IPAddress oldSecond(192, 0, 2, 36);
+  const IPAddress newcomer(192, 0, 2, 37);
+  const char* address = "player_11/chest/group_1";
+  WiFiUDP::inject(oldFirst, 7700, pong(address));
+  WiFiUDP::inject(oldSecond, 7700, pong(address));
+  hb.poll();
+  Hapbeat::Playback playback =
+      hb.playSineSource(100.0f, 1.0f, 0, "player_11/chest", 0.0f, true);
+  hb.tick();
+  assert(playback.valid() && playback.isActive());
+  assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 2);
+
+  // Two stale same-address sessions and one new route are ambiguous. They
+  // must not transfer either old cursor; the newcomer gets a fresh BEGIN.
+  hapbeat_host_now_ms = 20;
+  WiFiUDP::inject(newcomer, 7700, pong(address));
+  WiFiUDP::sent.clear();
+  hb.tick();
+  assert(playback.isActive());
+  assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 1);
+  assert(countStreamTo(hapbeat::CMD_STREAM_DATA, newcomer) > 0);
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent)
+    if (sent.ip == newcomer && isStream(sent, hapbeat::CMD_STREAM_DATA)) {
+      assert(read32(sent.data, 8) == 0);
+      break;
+    }
+}
+
 static void test_linger_rejoin_has_no_catchup_burst() {
   WiFiUDP::clear();
   hapbeat_host_now_ms = 0;
@@ -361,19 +445,19 @@ static void test_linger_rejoin_has_no_catchup_burst() {
   const IPAddress endpoint(192, 0, 2, 60);
   WiFiUDP::inject(endpoint, 7700, pong("player_6/chest/group_1"));
   hb.poll();
-  Hapbeat::Playback* first = hb.playSineSource(
+  Hapbeat::Playback first = hb.playSineSource(
       100.0f, 1.0f, 0, "player_6/chest", 0.0f, true);
   hb.tick();
   hapbeat_host_now_ms = 160;
   hb.tick();
-  first->stop();
-  assert(first->isStopped());
+  first.stop();
+  assert(first.isStopped());
 
   // Rejoin during the 310 ms linger after more than one send-ahead quantum.
   hapbeat_host_now_ms = 200;
-  Hapbeat::Playback* second = hb.playSineSource(
+  Hapbeat::Playback second = hb.playSineSource(
       100.0f, 1.0f, 0, "player_6/chest", 0.0f, true);
-  assert(second && second->status() == HapbeatPlaybackStatus::Active);
+  assert(second.valid() && second.status() == HapbeatPlaybackStatus::Active);
   WiFiUDP::sent.clear();
   hb.tick();
   assert(countStream(hapbeat::CMD_STREAM_BEGIN) == 0);
@@ -386,25 +470,24 @@ static void test_linger_rejoin_has_no_catchup_burst() {
 
 static void test_frame_counter_wraparound() {
   WiFiUDP::clear();
-  hapbeat_host_now_ms = 0;
+  hapbeat_host_now_ms = 0xfffffff0u;
   Hapbeat hb;
   assert(hb.begin());
   WiFiUDP::inject(IPAddress(192, 0, 2, 70), 7700,
                   pong("player_7/chest/group_1"));
   hb.poll();
-  Hapbeat::Playback* playback = hb.playSineSource(
+  Hapbeat::Playback playback = hb.playSineSource(
       100.0f, 1.0f, 0, "player_7/chest", 0.0f, true);
   hb.tick();
-  assert(playback && playback->isActive());
+  assert(playback.valid() && playback.isActive());
   assert(!WiFiUDP::sent.empty());
   Hapbeat::StreamSession& session = hb._sessions[0];
   session.startedMs = 0;
   session.framesSent = (uint64_t)0xffffffffu - 255u;
   WiFiUDP::sent.clear();
-  hapbeat_host_now_ms = 0x10000000u;
-  for (uint8_t i = 0; i < Hapbeat::MAX_DEVICES; ++i)
-    if (hb._devices[i].used) hb._devices[i].lastPongMs = hapbeat_host_now_ms;
+  hapbeat_host_now_ms = 0x100u;
   hb.tick();
+  assert(hb._extendedMillis > (uint64_t)0xffffffffu);
   assert(session.framesSent > (uint64_t)0xffffffffu);
   assert(countStream(hapbeat::CMD_STREAM_DATA) <= Hapbeat::MAX_CHUNKS_PER_TICK);
 }
@@ -417,9 +500,9 @@ static void test_fixed_point_phase_after_long_cursor() {
   WiFiUDP::inject(IPAddress(192, 0, 2, 80), 7700,
                   pong("player_8/chest/group_1"));
   hb.poll();
-  Hapbeat::Playback* playback = hb.playSineSource(
+  Hapbeat::Playback playback = hb.playSineSource(
       440.0f, 1.0f, 0, "player_8/chest", 0.0f, true);
-  assert(playback && playback->isActive());
+  assert(playback.valid() && playback.isActive());
   Hapbeat::StreamSession& session = hb._sessions[0];
   Hapbeat::SineSource& source = hb._sources[0];
   session.cursors[0] = 1u << 24;
@@ -437,6 +520,36 @@ static void test_fixed_point_phase_after_long_cursor() {
   assert((int16_t)read16(packetVector, 14) == expected);
 }
 
+static void test_finite_duration_frame_count_width() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  WiFiUDP::inject(IPAddress(192, 0, 2, 90), 7700,
+                  pong("player_12/chest/group_1"));
+  hb.poll();
+  // 2^28 ms * 16 frames/ms is exactly 2^32 frames, which used to wrap to
+  // zero and turn this finite source into an open-ended source.
+  Hapbeat::Playback playback = hb.playSineSource(
+      440.0f, 1.0f, 268435456u, "player_12/chest", 0.0f, false);
+  assert(playback.valid() && playback.isActive());
+  Hapbeat::SineSource& source = hb._sources[0];
+  Hapbeat::StreamSession& session = hb._sessions[0];
+  assert(source.totalFrames == 4294967296ULL);
+  session.cursors[0] = 4294967295ULL;
+  uint8_t packet[hapbeat::HEADER_SIZE + 4 + 4] = {0};
+  uint8_t finishedMask = 0;
+  hb.mixSession(session, 1, packet, sizeof(packet), finishedMask);
+  assert(session.cursors[0] == 4294967296ULL);
+  assert((finishedMask & 1u) != 0);
+
+  Hapbeat::Playback maximum = hb.playSineSource(
+      440.0f, 1.0f, 0xffffffffu, "player_12/chest", 0.0f, false);
+  assert(maximum.valid());
+  assert(hb._sources[1].totalFrames ==
+         ((uint64_t)0xffffffffu * 16000ULL) / 1000ULL);
+}
+
 int main() {
   test_routing_and_mixing();
   test_same_address_different_ip_are_distinct();
@@ -444,8 +557,11 @@ int main() {
   test_begin_retry_and_source_pool_exhaustion();
   test_route_migration_keeps_session();
   test_route_identity_wins_over_address_sibling();
+  test_exact_claim_precedes_ambiguous_migration();
+  test_ambiguous_address_migration_starts_new_session();
   test_linger_rejoin_has_no_catchup_burst();
   test_frame_counter_wraparound();
   test_fixed_point_phase_after_long_cursor();
+  test_finite_duration_frame_count_width();
   return 0;
 }
