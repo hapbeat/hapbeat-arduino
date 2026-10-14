@@ -15,6 +15,12 @@ Two ways to make haptics, no stored audio required:
   intensity, pan, and duration are live parameters — expressive without WAV
   files.
 
+> **Device firmware 0.5.0 and later:** this library's sine streaming (`playSine`,
+> and `beginSine` / `pumpSine` / `endSine` in the published v0.2.0) sends the
+> older stream format, which firmware 0.5.0+ no longer accepts, so sine streams
+> are **silent** on those devices. `play()` (command mode, firing a kit event)
+> still works. On firmware 0.4.x and earlier, sine streams work too.
+
 This is the **level-1** library (initial draft). Verify on your own ESP32 before
 relying on it; ESP-NOW transport and richer synthesis are future work.
 

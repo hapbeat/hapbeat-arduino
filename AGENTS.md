@@ -31,6 +31,9 @@ streaming. Stored-WAV/clip streaming, an EventMap, and ESP-NOW transport are
   loop, and duration are live parameters. **No kit, no WAV, no Studio** — the
   fastest first success.
 
+Sine streams use the older stream format: on device firmware 0.5.0 and later
+they are silent; `play()` (command mode) still works.
+
 Event id format is `<kit-name>.<file-name>` (e.g. `sample-kit.sine_100hz`); the
 id must exist in the kit deployed to the device.
 
@@ -38,7 +41,7 @@ id must exist in the kit deployed to the device.
 
 - **Arduino IDE**: Library Manager → search "Hapbeat", or *Sketch → Include
   Library → Add .ZIP Library* from a repo ZIP.
-- **PlatformIO**: `lib_deps = hapbeat/arduino@^0.1.0`
+- **PlatformIO**: `lib_deps = hapbeat/arduino@^0.2.0`
 
 ## Quick start
 
