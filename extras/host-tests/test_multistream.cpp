@@ -637,10 +637,35 @@ static void test_nonfinite_sine_parameters_are_rejected() {
   assert(hb._sources[0].gain == 0.5f);
   assert(hb._sources[0].pan == 0.25f);
   WiFiUDP::sent.clear();
-  hb.play("test.nan_gain", NAN, "player_14/chest", 0.0f);
   hb.play("test.inf_pan", 1.0f, "player_14/chest", INFINITY);
   assert(WiFiUDP::sent.empty());
   playback.stop();
+}
+
+// The PLAY gain on the wire (after event_id\0, target\0 and target_time).
+static float playGainOnWire(const WiFiUDP::Sent& sent, const char* eventId) {
+  const size_t offset = hapbeat::HEADER_SIZE + strlen(eventId) + 1 + 1 + 8;
+  const uint32_t bits = read32(sent.data, offset);
+  float value;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+// PLAY carries clamp(gain, 0, 1), and 0 for NaN / infinity (contracts
+// kit-format.md "強さの式"); the device does not clamp it.
+static void test_play_gain_is_clamped() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  const float gains[] = {0.6f, 1.6f, -0.2f, (float)NAN, (float)INFINITY, -(float)INFINITY};
+  const float sent[] = {0.6f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+  for (size_t i = 0; i < sizeof(gains) / sizeof(gains[0]); ++i) {
+    WiFiUDP::sent.clear();
+    hb.play("k.e", gains[i], "", 0.0f);
+    assert(WiFiUDP::sent.size() == 1);
+    assert(playGainOnWire(WiFiUDP::sent[0], "k.e") == sent[i]);
+  }
 }
 
 int main() {
@@ -657,5 +682,6 @@ int main() {
   test_fixed_point_phase_after_long_cursor();
   test_finite_duration_frame_count_width();
   test_nonfinite_sine_parameters_are_rejected();
+  test_play_gain_is_clamped();
   return 0;
 }

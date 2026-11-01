@@ -53,7 +53,8 @@ bool addressMatches(const char* target, const char* address);
 // target "" = broadcast. pan is the left/right balance (-1 = left only, 0 =
 // centre, +1 = right only) and is clamped to [-1, 1] here, so every sender goes
 // out spec-conformant; senders must always write it (a receiver that predates
-// the field just ignores the trailing 4 bytes).
+// the field just ignores the trailing 4 bytes). gain is written as
+// clamp(gain, 0, 1), and NaN / infinity as 0: the device does not clamp it.
 size_t buildPlay(uint8_t* out, size_t cap, uint16_t seq, const char* eventId,
                  const char* target, int64_t targetTimeUs, float gain,
                  float pan = 0.0f);

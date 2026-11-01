@@ -404,7 +404,7 @@ bool Hapbeat::discover(uint32_t timeoutMs) {
 
 void Hapbeat::play(const char* eventId, float gain, const char* target,
                    float pan) {
-  if (!isfinite(gain) || !isfinite(pan)) return;
+  if (!isfinite(pan)) return;
   uint8_t packet[256];
   sendRouted(packet, hapbeat::buildPlay(packet, sizeof(packet), nextSeq(), eventId,
                                         target, 0, gain, pan));

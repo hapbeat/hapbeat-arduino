@@ -72,7 +72,7 @@ void loop() {
 | Method | Purpose |
 |---|---|
 | `begin(port = 7700, appName = "")` | open the UDP socket; `appName` (≤16 chars) shows on the Hapbeat OLED while connected |
-| `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event (gain 0..1; linear left/right balance) |
+| `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event. `gain` is the app gain; PLAY carries `clamp(gain, 0, 1)` (NaN / infinity as 0). The Kit manifest is not read, so the Kit's `clip_gain` is not applied (counts as 1; contracts kit-format.md "強さの式（正本）"). Linear left/right balance |
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
 | `ping()` | keep-alive / RTT probe |
 | `setGroup(group)` | group id sent in CONNECT_STATUS (level-1 default 0) |

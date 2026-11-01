@@ -76,7 +76,7 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 | Method | Purpose |
 |---|---|
 | `begin(port = 7700, appName = "")` | open the UDP socket; announce app name |
-| `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event (gain 0..1; `pan` is the left/right balance, -1 = left only … 0 = centre … +1 = right only) |
+| `play(eventId, gain = 1.0, target = "", pan = 0.0)` | fire a kit event. `gain` is the app gain; the PLAY carries `clamp(gain, 0, 1)` (NaN / infinity as 0). This library does not read the Kit manifest, so the Kit's `clip_gain` is not applied (it counts as 1). `pan` is the left/right balance, -1 = left only … 0 = centre … +1 = right only |
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
 | `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a move-only value `Playback` handle; keep the owning `Hapbeat` alive while using it |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |

@@ -1,6 +1,7 @@
 // HapbeatProtocol.cpp — see HapbeatProtocol.h.
 #include "HapbeatProtocol.h"
 
+#include <math.h>
 #include <string.h>
 
 namespace {
@@ -95,6 +96,10 @@ bool addressMatches(const char* target, const char* address) {
 
 size_t buildPlay(uint8_t* out, size_t cap, uint16_t seq, const char* eventId,
                  const char* target, int64_t targetTimeUs, float gain, float pan) {
+  // The device does not clamp gain (above 1 distorts, below 0 inverts): send
+  // clamp(gain, 0, 1), and 0 for NaN / infinity (contracts kit-format.md).
+  if (!isfinite(gain) || gain < 0.0f) gain = 0.0f;
+  if (gain > 1.0f) gain = 1.0f;
   if (pan < -1.0f) pan = -1.0f;
   if (pan > 1.0f) pan = 1.0f;
   Writer w(out, cap);

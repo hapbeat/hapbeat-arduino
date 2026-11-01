@@ -88,8 +88,10 @@ class Hapbeat {
   bool begin(uint16_t port = 7700, const char* appName = "");
 
   // Fire a kit event by id (must exist in the kit deployed to the device via
-  // Hapbeat Studio). gain is 0..1. target "" = all devices; pan is the
-  // left/right balance (-1 = left only, 0 = centre, +1 = right only).
+  // Hapbeat Studio). gain is the app gain; the PLAY carries clamp(gain, 0, 1)
+  // (NaN / infinity as 0). This library does not read the Kit manifest, so the
+  // Kit's clip_gain is not applied (it counts as 1). target "" = all devices;
+  // pan is the left/right balance (-1 = left only, 0 = centre, +1 = right only).
   void play(const char* eventId, float gain = 1.0f, const char* target = "",
             float pan = 0.0f);
   void stop(const char* eventId, const char* target = "");
