@@ -22,7 +22,7 @@ on:
 
 jobs:
   arduino-lint:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       - name: Arduino Lint (library-manager update ruleset)
@@ -33,7 +33,7 @@ jobs:
           project-type: library
 
   compile-examples:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # compile-sketches sets up Python 3.12.4, which has no build for ubuntu 26.04 (ubuntu-latest since 2026-11)
     strategy:
       fail-fast: false
       matrix:
