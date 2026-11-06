@@ -1644,6 +1644,167 @@ static void test_warning_handler() {
   hb.setWarningHandler(nullptr);
 }
 
+// A finite source that finished on one endpoint is done even if another
+// matched endpoint never became usable, and the session lingering out does
+// not make it play again there (sdk-multi-stream section 6.10).
+static void test_finite_source_finishes_once_with_unknown_sibling() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  const IPAddress ready(192, 0, 2, 160);
+  const IPAddress unknown(192, 0, 2, 161);
+  classifyGen2(hb, ready, 7700, "player_40/a/group_1", kBoot, 9);
+  WiFiUDP::inject(unknown, 7700, pong("player_40/b/group_1"));
+  hb.poll();
+  Hapbeat::Playback playback =
+      hb.playSineSource(100.0f, 1.0f, 100, "player_40", 0.0f, false);
+  assert(playback.isActive());
+  for (int i = 0; i < 100; ++i) {  // 2 s: well past the linger and END
+    hapbeat_host_now_ms += 20;
+    hb.tick();
+  }
+  assert(playback.isStopped());
+  uint32_t audioBytes = 0;
+  uint32_t generation = 0;
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent) {
+    if (sent.ip != ready || !isGen2Stream(sent)) continue;
+    if (generation == 0) generation = generationOf(sent);
+    assert(generationOf(sent) == generation);  // one session, no replay
+    if (sent.data[3] == hapbeat::CMD_STREAM_DATA)
+      audioBytes += (uint32_t)(sent.data.size() - 28);
+  }
+  assert(audioBytes == 1600u * 4u);  // exactly 100 ms of stereo PCM16
+  assert(countStreamTo(hapbeat::CMD_STREAM_END, ready) == 1);
+  assert(countStreamTo(hapbeat::CMD_STREAM_BEGIN, unknown) == 0);
+}
+
+// stopAll() ends the sessions at once: STOP_ALL ends them on the device, so a
+// source started right after must begin the next generation, not send DATA
+// into the stopped one.
+static void test_stop_all_then_new_source_takes_next_generation() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  const IPAddress ip(192, 0, 2, 165);
+  classifyGen2(hb, ip, 7700, "player_41/a/group_1", kBoot, 4);
+  Hapbeat::Playback first = hb.playSineSource(100.0f, 1.0f, 0, "player_41", 0.0f, true);
+  for (int i = 0; i < 5; ++i) {
+    hapbeat_host_now_ms += 20;
+    hb.tick();
+  }
+  WiFiUDP::sent.clear();
+  hb.stopAll();
+  assert(first.isStopped());
+  assert(countStreamTo(hapbeat::CMD_STREAM_END, ip) == 1);
+  Hapbeat::Playback second = hb.playSineSource(100.0f, 1.0f, 0, "player_41", 0.0f, true);
+  for (int i = 0; i < 5; ++i) {
+    hapbeat_host_now_ms += 20;
+    hb.tick();
+  }
+  assert(second.isActive());
+  size_t data = 0;
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent) {
+    if (sent.ip != ip || !isGen2Stream(sent)) continue;
+    if (sent.data[3] == hapbeat::CMD_STREAM_END) {
+      assert(generationOf(sent) == 1);
+      continue;
+    }
+    assert(generationOf(sent) == 2);  // every BEGIN / DATA after stopAll
+    if (sent.data[3] == hapbeat::CMD_STREAM_DATA) ++data;
+  }
+  assert(data > 0);
+  second.stop();
+}
+
+// ERROR STREAM_STOPPED (another sender's STOP_ALL) takes the session's sources
+// off that endpoint for good; other endpoints keep playing; a new Playback
+// joins the endpoint under the next generation; a loop source stops once it
+// has left its last endpoint (sdk-multi-stream section 6.13).
+static void test_stream_stopped_detaches_sources() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  const IPAddress a(192, 0, 2, 166);
+  const IPAddress b(192, 0, 2, 167);
+  classifyGen2(hb, a, 7700, "player_42/a/group_1", kBoot, 4);
+  classifyGen2(hb, b, 7700, "player_42/b/group_1", kBoot + 1, 6);
+  Hapbeat::Playback loop = hb.playSineSource(100.0f, 1.0f, 0, "player_42", 0.0f, true);
+  for (int i = 0; i < 5; ++i) {
+    hapbeat_host_now_ms += 20;
+    hb.tick();
+  }
+  WiFiUDP::sent.clear();
+  WiFiUDP::inject(a, 7700, errorPacket(hapbeat::ERR_STREAM_STOPPED, "stopped",
+                                       hapbeat::CMD_STREAM_DATA,
+                                       envelopeBytes(kBoot, 4, 1)));
+  hb.poll();
+  for (int i = 0; i < 25; ++i) {  // 500 ms, past the linger
+    hapbeat_host_now_ms += 20;
+    hb.tick();
+  }
+  assert(loop.isActive());
+  assert(countStreamTo(hapbeat::CMD_STREAM_BEGIN, a) == 0);
+  assert(countStreamTo(hapbeat::CMD_STREAM_DATA, a) == 0);
+  assert(countStreamTo(hapbeat::CMD_STREAM_DATA, b) > 0);
+
+  WiFiUDP::sent.clear();
+  Hapbeat::Playback fresh = hb.playSineSource(80.0f, 1.0f, 0, "player_42/a", 0.0f, true);
+  for (int i = 0; i < 5; ++i) {
+    hapbeat_host_now_ms += 20;
+    hb.tick();
+  }
+  assert(fresh.isActive());
+  size_t freshData = 0;
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent) {
+    if (sent.ip != a || !isGen2Stream(sent)) continue;
+    assert(generationOf(sent) == 2);
+    if (sent.data[3] == hapbeat::CMD_STREAM_DATA) ++freshData;
+  }
+  assert(freshData > 0);
+
+  WiFiUDP::inject(b, 7700, errorPacket(hapbeat::ERR_STREAM_STOPPED, "stopped",
+                                       hapbeat::CMD_STREAM_DATA,
+                                       envelopeBytes(kBoot + 1, 6, 1)));
+  hb.poll();
+  assert(loop.isStopped());
+  assert(fresh.isActive());
+  fresh.stop();
+}
+
+// A lease not refreshed for a TTL may have expired on the device: a new
+// session waits for the lease reply instead of sending a BEGIN the device
+// would answer with STREAM_LEASE_INVALID.
+static void test_stale_lease_is_refreshed_before_begin() {
+  WiFiUDP::clear();
+  hapbeat_host_now_ms = 0;
+  Hapbeat hb;
+  assert(hb.begin());
+  const IPAddress ip(192, 0, 2, 168);
+  const char* address = "player_43/a/group_1";
+  classifyGen2(hb, ip, 7700, address, kBoot, 4);
+  hapbeat_host_now_ms = 20000;  // idle: no source, so no lease PING
+  WiFiUDP::inject(ip, 7700, pong(address));  // discovery keeps it alive
+  hb.poll();
+  WiFiUDP::sent.clear();
+  Hapbeat::Playback playback = hb.playSineSource(100.0f, 1.0f, 0, "player_43", 0.0f, true);
+  assert(playback.deferredReason() == HapbeatDeferredReason::LeaseUnavailable);
+  hb.tick();
+  assert(countStreamTo(hapbeat::CMD_STREAM_BEGIN, ip) == 0);
+  assert(countLeasePingsTo(ip) == 1);
+  answerLeasePings(0, ip, 7700, address, kBoot, 5);
+  hb.poll();
+  hapbeat_host_now_ms += 20;
+  hb.tick();
+  assert(playback.isActive());
+  assert(countStreamTo(hapbeat::CMD_STREAM_BEGIN, ip) > 0);
+  for (const WiFiUDP::Sent& sent : WiFiUDP::sent)
+    if (sent.ip == ip && isGen2Stream(sent)) assert(ticketOf(sent) == 5);
+  playback.stop();
+}
+
 int main() {
   test_routing_and_mixing();
   test_same_address_different_ip_are_distinct();
@@ -1675,6 +1836,10 @@ int main() {
   test_stream_errors();
   test_lease_ping_interval_and_stop();
   test_warning_handler();
-  printf("host tests: 30 passed\n");
+  test_finite_source_finishes_once_with_unknown_sibling();
+  test_stop_all_then_new_source_takes_next_generation();
+  test_stream_stopped_detaches_sources();
+  test_stale_lease_is_refreshed_before_begin();
+  printf("host tests: 34 passed\n");
   return 0;
 }

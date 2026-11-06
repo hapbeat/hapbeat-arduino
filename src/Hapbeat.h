@@ -215,6 +215,9 @@ class Hapbeat {
   static const uint32_t LEASE_RETRY_MS = 500;
   // Lease PINGs continue for one TTL after an endpoint's last session.
   static const uint32_t LEASE_TTL_MS = 15000;
+  // A new session needs a lease refreshed this recently (the TTL less a margin
+  // for the PING's travel time), else it waits for the next lease reply.
+  static const uint32_t LEASE_FRESH_MS = 14000;
   // Stream Gen 2 BEGIN repetition (Sender requirements 2): before each of the
   // first three DATA blocks, then at most 500 ms apart (450 leaves room for
   // tick jitter).
@@ -253,6 +256,9 @@ class Hapbeat {
     uint32_t ticket = 0;
     bool leaseValid = false;
     bool superseded = false;
+    // When the last matched lease reply was accepted. The device lets an
+    // unused lease expire one TTL after its last extended PING.
+    uint64_t leaseRefreshedMs = 0;
     uint32_t lastGeneration = 0;  // last generation under (bootId, ticket)
     bool hadSession = false;
     uint64_t lastSessionMs = 0;
@@ -293,6 +299,16 @@ class Hapbeat {
     float gain = 1.0f;
     float pan = 0.0f;
     bool loop = false;
+    // Device-table slots where this finite source played to the end. Kept on
+    // the source, not the session: a session that lingers out and is removed
+    // must not make the source play there again (sdk-multi-stream section 6.10).
+    uint8_t completedDevices = 0;
+    // Device-table slots whose session STOP_ALL ended (ERROR STREAM_STOPPED):
+    // this Playback never rejoins them (sdk-multi-stream section 6.13).
+    uint8_t stoppedDevices = 0;
+    bool played = false;   // played to the end on at least one endpoint
+    bool leftByStop = false;  // removed from an endpoint by STREAM_STOPPED
+    bool waiting = false;  // a matched endpoint holds or awaits its cursor
   };
 
   struct StreamSession {
@@ -393,6 +409,7 @@ class Hapbeat {
   bool leasePingWanted(const KnownDevice& device, uint64_t now) const;
   void sendLeasePing(KnownDevice& device, uint64_t now);
   EndpointMode endpointMode(const StreamEndpoint& endpoint) const;
+  bool leaseFresh(const StreamEndpoint& endpoint, uint64_t now) const;
   bool sessionCurrent(const StreamSession& session,
                       const StreamEndpoint& endpoint) const;
   HapbeatLeaseState leaseState(const KnownDevice& device) const;
@@ -431,11 +448,10 @@ class Hapbeat {
   bool endpointCoolingDown(const StreamEndpoint& endpoint, uint64_t now) const;
   void recordEnd(const StreamEndpoint& endpoint, uint64_t now);
   void removeSession(uint8_t slot);
-  bool sourceCompletedEverywhere(uint8_t sourceSlot,
-                                 const StreamEndpoint* endpoints,
-                                 uint8_t endpointCount) const;
-  void completeFinishedSources(const StreamEndpoint* endpoints,
-                               uint8_t endpointCount);
+  bool sourceFinished(uint8_t sourceSlot) const;
+  void forgetDeviceCompletion(uint8_t deviceSlot, bool alsoStopped);
+  void stopSessionSources(uint8_t sessionSlot, uint8_t deviceSlot);
+  void completeFinishedSources();
   void mixSession(StreamSession& session, uint16_t frames,
                   uint8_t* packet, size_t packetCapacity,
                   uint8_t& finishedMask);

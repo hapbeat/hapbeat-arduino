@@ -21,12 +21,21 @@
   - ERROR（0xFF）を受けます。既知の機体の port 7700 からのものだけ、stream のコードは
     自分の session の envelope と一致するものだけを扱います。`STREAM_NOT_STARTED`
     で BEGIN を再送、`STREAM_SUPERSEDED` で保留、`STREAM_LEASE_INVALID` で lease を
-    取り直し、`STREAM_GEN_UNSUPPORTED` で分類し直します。
+    取り直し、`STREAM_GEN_UNSUPPORTED` で分類し直します。`STREAM_STOPPED`（ほかの送り手の
+    STOP_ALL）では、その session の source をその機体から外し、同じ Playback では戻しません
+    （新しい Playback はふつうに参加します。`sdk-multi-stream.md` §6.13）。
+  - `stopAll()` は stream の session をその場で終えるようにしました。前は session を
+    310 ms 残したので、直後に始めた source が、機体が STOP_ALL で止めた session に
+    DATA を送り続け、鳴りませんでした（0.2.0 の Stream Gen 1 でも同じでした）。
+  - 最後に lease を受け取ってから 14 s を過ぎた機体には、新しい session を始める前に lease を取り直します（機体は使っていない lease を 15 s で捨てるので、古い lease の BEGIN は `STREAM_LEASE_INVALID` で断られていました）。
+  - 長さのある source は、どこか 1 台で最後まで鳴らし、どの session にも残っていなければ
+    `Stopped` になります。使えるようにならなかった機体は待ちません。前は、一致する機体の
+    1 台が始められないと、鳴らし終えた機体で頭から鳴らし直し続けていました。
 - 追加: `HapbeatDeferredReason` の `UnknownClass` / `LeaseUnavailable` / `Superseded`、
   `HapbeatStreamClass`、`HapbeatLeaseState`、`streamClass(ip)`、
   `streamEndpoints(out, max)`、`reacquireStreamOwnership()`、
   `setWarningHandler(fn)`（ライブラリは Serial に出力しません）。
-- 含まないもの: `STREAM_TIMED_OUT` / `STREAM_STOPPED` / `STREAM_TARGET_MISMATCH` の
+- 含まないもの: `STREAM_TIMED_OUT` / `STREAM_TARGET_MISMATCH` の
   ERROR への動作（警告だけ）、CAPS の読み取り（新しい major の機体への警告、モーター 1 個の
   機体で pan を掛けない混合）、endpoint の変化の callback、gain・pan の平滑化・limiter・
   差し替え（`sdk-multi-stream.md` §5.7・§5.8・§6.14）。ESP32 / ESP8266 以外のボードの

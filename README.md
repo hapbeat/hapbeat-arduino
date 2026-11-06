@@ -152,12 +152,19 @@ repeat their BEGIN, and restart under the next generation if `tick()` was not
 called for 3 s. Stream Gen 1 devices keep the 310 ms END-to-BEGIN guard (the
 source stays `Active` while it waits).
 
+`stopAll()` ends every stream session at once (the device's STOP_ALL ends them
+too), so a source started right after begins a new session. When another
+application's STOP_ALL ends a session (the device ERROR `STREAM_STOPPED`), the
+sources that session carried leave that device for good and keep playing on
+the others; a new `playSineSource` plays there as usual. A finite source is
+`Stopped` once it has played to the end on some device and no session still
+carries it; a device that never became usable does not hold it back.
+
 Not implemented in this version (stream-session.md / sdk-multi-stream.md):
 
-- The device ERRORs `STREAM_TIMED_OUT`, `STREAM_STOPPED` and
-  `STREAM_TARGET_MISMATCH` are only reported through the warning handler; the
-  library does not start a new generation, drop the sources from that device,
-  or re-resolve the endpoint for them.
+- The device ERRORs `STREAM_TIMED_OUT` and `STREAM_TARGET_MISMATCH` are only
+  reported through the warning handler; the library does not start a new
+  generation or re-resolve the endpoint for them.
 - CAPS is not read. A device on a newer firmware major gets no warning, and
   devices with one motor (`haptic_channels` = 1) still get the panned mix.
 - No endpoint-changed callback: poll `streamEndpoints()`.

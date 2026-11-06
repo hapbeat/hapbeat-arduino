@@ -132,8 +132,13 @@ segment, a short target front-matches. So `"player_1/pos_neck"` and
   streamed later; `reacquireStreamOwnership()` or the device handing it back
   clears it), `LeaseUnavailable` (Gen 2 device without a usable lease),
   `UnknownClass` (no reply to the lease PING yet), `NoResolvedEndpoint`.
+- `stopAll()` ends every stream session at once; a source started right after
+  begins a new session. ERROR `STREAM_STOPPED` (another sender's STOP_ALL)
+  takes that session's sources off that device for good; a new Playback joins
+  it as usual. A finite source is `Stopped` once it has played to the end on
+  some device and no session still carries it.
 - Not implemented: no action on the device ERRORs `STREAM_TIMED_OUT`,
-  `STREAM_STOPPED`, `STREAM_TARGET_MISMATCH` (warning only); CAPS is not read
+  `STREAM_TARGET_MISMATCH` (warning only); CAPS is not read
   (no newer-major warning, pan still applied on one-motor devices); no
   endpoint-changed callback; no gain/pan smoothing, limiter or re-splice;
   boards other than ESP32 / ESP8266 use a weak `random()` client incarnation.

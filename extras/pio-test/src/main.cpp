@@ -307,6 +307,14 @@ void loop() {
 
   handleSerial();
 
+  // Keep devices in the table: the library expires a device 15 s after its
+  // last PONG, and the periodic discovery PING is the sketch's job.
+  static uint32_t lastPingMs = 0;
+  if (g_wifi_ok && millis() - lastPingMs >= 2000) {
+    lastPingMs = millis();
+    hb.ping();
+  }
+
   // Service the hold source and all other endpoint-scoped streams.
   if (g_wifi_ok) hb.tick();
 

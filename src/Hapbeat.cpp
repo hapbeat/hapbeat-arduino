@@ -331,8 +331,12 @@ int8_t Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
   if (slot < 0) slot = freeSlot >= 0 ? freeSlot : oldest;
   if (slot < 0) return -1;
   KnownDevice& device = _devices[slot];
-  // A free or evicted slot holds another device's class and lease.
-  if (fresh) device = KnownDevice();
+  // A free or evicted slot holds another device's class and lease, and the
+  // sources' completion on that slot belongs to the previous device.
+  if (fresh) {
+    device = KnownDevice();
+    forgetDeviceCompletion((uint8_t)slot, true);
+  }
   device.used = true;
   device.ip = ip;
   device.port = port;
@@ -451,6 +455,7 @@ void Hapbeat::handlePong(IPAddress ip, uint16_t port, size_t length) {
     device.leaseValid = valid;
     device.superseded = superseded;
     device.leaseIncarnation = incarnation;
+    device.leaseRefreshedMs = extendedMillis();
     device.lastAcceptedTimestampUs = info.timestampUs;
     return;
   }
@@ -537,9 +542,13 @@ void Hapbeat::handleError(IPAddress ip, uint16_t port, size_t length) {
     case hapbeat::ERR_STREAM_NOT_STARTED:
       if (current) sendStreamBegin(*current, now);
       break;
+    case hapbeat::ERR_STREAM_STOPPED:
+      if (current)
+        stopSessionSources((uint8_t)(current - _sessions), (uint8_t)slot);
+      break;
     default:
-      // Reported only. STREAM_TIMED_OUT, STREAM_STOPPED and
-      // STREAM_TARGET_MISMATCH are not acted on by this version (README).
+      // Reported only. STREAM_TIMED_OUT and STREAM_TARGET_MISMATCH are not
+      // acted on by this version (README).
       break;
   }
 }
@@ -589,7 +598,9 @@ void Hapbeat::serviceLeasePings(uint64_t now) {
     const HapbeatLeaseState lease = leaseState(device);
     const bool retry =
         device.streamClass == HapbeatStreamClass::Unknown ||
-        lease == HapbeatLeaseState::Unavailable;
+        lease == HapbeatLeaseState::Unavailable ||
+        (lease == HapbeatLeaseState::Valid &&
+         now - device.leaseRefreshedMs >= LEASE_FRESH_MS);
     const uint32_t interval = retry ? LEASE_RETRY_MS : LEASE_REFRESH_MS;
     if (device.leasePinged && now - device.lastLeasePingMs < interval) continue;
     sendLeasePing(device, now);
@@ -658,6 +669,11 @@ bool Hapbeat::sessionCurrent(const StreamSession& session,
   const int8_t slot = findDevice(endpoint.ip, endpoint.port);
   return slot >= 0 && _devices[slot].bootId == session.bootId &&
          _devices[slot].ticket == session.ticket;
+}
+
+bool Hapbeat::leaseFresh(const StreamEndpoint& endpoint, uint64_t now) const {
+  const int8_t slot = findDevice(endpoint.ip, endpoint.port);
+  return slot >= 0 && now - _devices[slot].leaseRefreshedMs < LEASE_FRESH_MS;
 }
 
 HapbeatLeaseState Hapbeat::leaseState(const KnownDevice& device) const {
@@ -786,7 +802,10 @@ void Hapbeat::stop(const char* eventId, const char* target) {
 }
 
 void Hapbeat::stopAll(const char* target) {
-  clearAllSources(false);
+  // End every session now: STOP_ALL ends them on the device, so a session left
+  // to linger would carry the next source into a generation the device has
+  // stopped. The next source starts a new session (generation).
+  clearAllSources(true);
   uint8_t packet[128];
   sendRouted(packet, hapbeat::buildStopAll(packet, sizeof(packet), nextSeq(), target));
 }
@@ -840,6 +859,11 @@ Hapbeat::Playback Hapbeat::playSineSource(float freqHz, float intensity,
     _sessions[s].cursors[slot] = 0;
   }
   source.used = true;
+  source.completedDevices = 0;
+  source.stoppedDevices = 0;
+  source.played = false;
+  source.leftByStop = false;
+  source.waiting = false;
   source.id = nextPlaybackId();
   const double scaledStep = (double)freqHz * kPhaseModulus /
                             (double)STREAM_SAMPLE_RATE;
@@ -1100,26 +1124,59 @@ void Hapbeat::restartSession(StreamSession& session, uint64_t now) {
   session.beginSent = sendStreamBegin(session, now);
 }
 
-bool Hapbeat::sourceCompletedEverywhere(
-    uint8_t sourceSlot, const StreamEndpoint* endpoints,
-    uint8_t endpointCount) const {
-  if (sourceSlot >= MAX_STREAM_SOURCES || !_sources[sourceSlot].used) return false;
-  bool matched = false;
-  for (uint8_t i = 0; i < endpointCount; ++i) {
-    if (!sourceMatches(_sources[sourceSlot], endpoints[i])) continue;
-    matched = true;
-    const int8_t sessionSlot = findSession(endpoints[i]);
-    if (sessionSlot < 0 || !_sessions[sessionSlot].completed[sourceSlot]) return false;
-  }
-  return matched;
+// A finite source is done once it played to the end on some endpoint and no
+// session still carries it (sdk-multi-stream section 6.10). An endpoint that
+// could not start (unknown class, unusable lease) does not hold it back; one
+// waiting out the Stream Gen 1 guard or a lease renewal with its cursor does.
+bool Hapbeat::sourceFinished(uint8_t sourceSlot) const {
+  if (sourceSlot >= MAX_STREAM_SOURCES) return false;
+  const SineSource& source = _sources[sourceSlot];
+  if (!source.used || !source.played || source.waiting) return false;
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s)
+    if (_sessions[s].used && _sessions[s].attached[sourceSlot]) return false;
+  return true;
 }
 
-void Hapbeat::completeFinishedSources(const StreamEndpoint* endpoints,
-                                      uint8_t endpointCount) {
+void Hapbeat::forgetDeviceCompletion(uint8_t deviceSlot, bool alsoStopped) {
+  static_assert(MAX_DEVICES <= 8, "completedDevices is an 8-bit mask");
+  if (deviceSlot >= MAX_DEVICES) return;
+  const uint8_t keep = (uint8_t)~(1u << deviceSlot);
+  for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
+    _sources[i].completedDevices &= keep;
+    if (alsoStopped) _sources[i].stoppedDevices &= keep;
+  }
+}
+
+// STOP_ALL ended this session on the device (ERROR STREAM_STOPPED,
+// sdk-multi-stream section 6.13). The sources it carried leave this endpoint
+// and do not rejoin it; they count as played there. The device has already
+// ended the session, so no END is sent. A new Playback joins the endpoint as
+// usual under the next generation.
+void Hapbeat::stopSessionSources(uint8_t sessionSlot, uint8_t deviceSlot) {
+  if (sessionSlot >= MAX_STREAM_SESSIONS || deviceSlot >= MAX_DEVICES) return;
+  StreamSession& session = _sessions[sessionSlot];
+  for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
+    if (!session.attached[i]) continue;
+    session.attached[i] = false;
+    SineSource& source = _sources[i];
+    if (!source.used) continue;
+    source.stoppedDevices |= (uint8_t)(1u << deviceSlot);
+    source.played = true;
+    source.leftByStop = true;
+  }
+  removeSession(sessionSlot);
+  completeFinishedSources();
+}
+
+// Finite sources finish as in sourceFinished(); a loop or open-ended source
+// stops only when STREAM_STOPPED has taken it off its last endpoint.
+void Hapbeat::completeFinishedSources() {
   for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
     SineSource& source = _sources[i];
-    if (!source.used || source.totalFrames == 0 || source.loop) continue;
-    if (!sourceCompletedEverywhere(i, endpoints, endpointCount)) continue;
+    if (!source.used) continue;
+    const bool finite = source.totalFrames != 0 && !source.loop;
+    if (!finite && !source.leftByStop) continue;
+    if (!sourceFinished(i)) continue;
     source.status = HapbeatPlaybackStatus::Stopped;
     source.reason = HapbeatDeferredReason::None;
     source.used = false;
@@ -1229,6 +1286,9 @@ void Hapbeat::reconcileStreams(uint64_t now) {
     if (_sessions[s].used && !sessionClaimed[s]) {
       // A vanished or ambiguous endpoint is forgotten without END. If it
       // later returns it is a new session and finite sources begin at frame 0.
+      const int8_t device =
+          findDevice(_sessions[s].endpoint.ip, _sessions[s].endpoint.port);
+      if (device >= 0) forgetDeviceCompletion((uint8_t)device, false);
       removeSession(s);
     }
   }
@@ -1316,21 +1376,32 @@ void Hapbeat::reconcileStreams(uint64_t now) {
     if (!source.used) continue;
     bool assigned = false;
     bool guarded = false;
+    bool waiting = false;
     HapbeatDeferredReason reason = HapbeatDeferredReason::NoResolvedEndpoint;
     for (uint8_t e = 0; e < endpointCount; ++e) {
       if (!sourceMatches(source, endpoints[e])) continue;
+      const int8_t device = findDevice(endpoints[e].ip, endpoints[e].port);
+      if (device >= 0 &&
+          ((source.completedDevices | source.stoppedDevices) &
+           (uint8_t)(1u << device)))
+        continue;  // played to the end there already, or STOP_ALL ended it
       int8_t sessionSlot = findSession(endpoints[e]);
       const bool suspended = sessionSlot >= 0 && _sessions[sessionSlot].gen2 &&
                              _sessions[sessionSlot].generation == 0;
       if (suspended) {
         reason = strongerReason(reason, HapbeatDeferredReason::LeaseUnavailable);
+        if (_sessions[sessionSlot].attached[i]) waiting = true;
       } else if (sessionSlot < 0) {
         const EndpointMode mode = endpointMode(endpoints[e]);
         if (mode == EndpointMode::Unknown) {
           reason = strongerReason(reason, HapbeatDeferredReason::UnknownClass);
           continue;
         }
-        if (mode == EndpointMode::LeaseUnavailable) {
+        if (mode == EndpointMode::LeaseUnavailable ||
+            (mode == EndpointMode::Gen2 && !leaseFresh(endpoints[e], now))) {
+          // An unused lease expires on the device one TTL after its last
+          // extended PING; wait for the refresh tick() sends instead of a
+          // BEGIN the device would answer with STREAM_LEASE_INVALID.
           reason = strongerReason(reason, HapbeatDeferredReason::LeaseUnavailable);
           continue;
         }
@@ -1341,6 +1412,7 @@ void Hapbeat::reconcileStreams(uint64_t now) {
         // Waiting out the Stream Gen 1 guard counts as Active (section 3).
         if (mode == EndpointMode::Gen1 && endpointCoolingDown(endpoints[e], now)) {
           guarded = true;
+          waiting = true;
           continue;
         }
         for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
@@ -1373,6 +1445,7 @@ void Hapbeat::reconcileStreams(uint64_t now) {
       }
       if (!suspended) assigned = assigned || session.beginSent;
     }
+    source.waiting = waiting;
     const bool active = assigned || guarded;
     source.status = active ? HapbeatPlaybackStatus::Active
                            : HapbeatPlaybackStatus::Deferred;
@@ -1553,10 +1626,13 @@ void Hapbeat::pumpStreams(uint64_t now) {
       session.framesSent += maximum;
       if (session.dataBlocksSent < 255) ++session.dataBlocksSent;
       session.lastDataMs = now;
+      const int8_t device = findDevice(session.endpoint.ip, session.endpoint.port);
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
         if (!(finishedMask & (uint8_t)(1u << i))) continue;
         session.attached[i] = false;
         session.completed[i] = true;
+        _sources[i].played = true;
+        if (device >= 0) _sources[i].completedDevices |= (uint8_t)(1u << device);
       }
       hasAttached = false;
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
@@ -1574,9 +1650,7 @@ void Hapbeat::pumpStreams(uint64_t now) {
     }
   }
 
-  StreamEndpoint endpoints[MAX_DEVICES];
-  const uint8_t endpointCount = collectStreamEndpoints(endpoints, MAX_DEVICES);
-  completeFinishedSources(endpoints, endpointCount);
+  completeFinishedSources();
 }
 
 void Hapbeat::stopSource(uint8_t slot, uint16_t id, uint64_t generation) {
@@ -1623,6 +1697,8 @@ void Hapbeat::setSourceLoop(uint8_t slot, uint16_t id, uint64_t generation,
   if (value) {
     for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s)
       _sessions[s].completed[slot] = false;
+    _sources[slot].completedDevices = 0;
+    _sources[slot].played = false;
     reconcileStreams(extendedMillis());
   }
 }
