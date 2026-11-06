@@ -3,7 +3,7 @@
 Single self-contained reference so an AI coding agent can use this library
 correctly from one file. Include name: `Hapbeat.h`. Repo: `hapbeat-arduino`.
 
-- last-verified-against: 0.2.0
+- last-verified-against: 1.0.0
 - Source of truth is the code: public API in `src/Hapbeat.h`, the wire format in
   `src/HapbeatProtocol.h` / `.cpp`. If this file disagrees with the code, the
   code wins.

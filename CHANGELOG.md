@@ -2,7 +2,7 @@
 
 **Hapbeat** Arduino ライブラリ（`hapbeat-arduino`）の主要な変更点をまとめます。
 
-## Unreleased
+## 1.0.0 — Stream Gen 2（1.x の通信）に対応
 
 対応する contracts: 1.0.0（tag `v1.0.0`）。
 

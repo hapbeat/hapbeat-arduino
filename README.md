@@ -22,8 +22,8 @@ Two ways to make haptics, no stored audio required:
 > The published v0.2.0 and older send only Stream Gen 1, which is silent on
 > firmware 0.5.0+.
 
-This is the **level-1** library (initial draft). Verify on your own ESP32 before
-relying on it; ESP-NOW transport and richer synthesis are future work.
+Checked on an M5Stack Core (ESP32) against Hapbeat devices on firmware 1.0.
+ESP-NOW transport and richer synthesis are future work.
 
 ## Install
 

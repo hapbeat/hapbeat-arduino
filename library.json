@@ -1,6 +1,6 @@
 {
   "name": "arduino",
-  "version": "1.0.0-d1",
+  "version": "1.0.0",
   "description": "Drive Hapbeat haptic devices from ESP32 / M5Stack over Wi-Fi UDP. Fire kit events or register fixed-capacity endpoint-scoped sine sources mixed to stereo PCM16. No stored audio needed.",
   "keywords": "hapbeat, haptics, esp32, m5stack, udp, wifi, vibration",
   "repository": {
