@@ -2,47 +2,69 @@
 #include "Hapbeat.h"
 
 #include <math.h>
+#include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
+
+#if defined(ESP32)
+#if __has_include(<esp_random.h>)
+#include <esp_random.h>
+#else
+#include <esp_system.h>
+#endif
+#endif
 
 namespace {
 
-constexpr size_t kPongBufferSize = 256;
 constexpr float kPhaseToRadians = 6.28318530717958647692f / 4294967296.0f;
 constexpr double kPhaseModulus = 4294967296.0;
+constexpr uint32_t kMaxGeneration = 0xFFFFFFFFu;
 
-bool readCString(const uint8_t* data, size_t end, size_t& pos, char* out,
-                 size_t capacity) {
-  if (!out || capacity == 0) return false;
-  const size_t start = pos;
-  while (pos < end && data[pos] != 0) ++pos;
-  if (pos >= end || pos - start >= capacity) return false;
-  memcpy(out, data + start, pos - start);
-  out[pos - start] = '\0';
-  ++pos;
-  return true;
+// Source of client incarnations. A restarted MCU must not repeat the previous
+// value: the device would return the old lease and reject generation 1 as
+// already used. ESP32 / ESP8266 use their hardware RNG; other boards fall back
+// to Arduino random() seeded from the clock, which is weak (README).
+uint64_t randomU64() {
+#if defined(ESP32)
+  return ((uint64_t)esp_random() << 32) | (uint64_t)esp_random();
+#elif defined(ESP8266)
+  return ((uint64_t)ESP.random() << 32) | (uint64_t)ESP.random();
+#else
+  static bool seeded = false;
+  if (!seeded) {
+    randomSeed((unsigned long)micros());
+    seeded = true;
+  }
+  uint64_t value = 0;
+  for (int i = 0; i < 4; ++i)
+    value = (value << 16) | (uint64_t)(random(0x10000L) & 0xFFFF);
+  return value;
+#endif
 }
 
-bool skipCString(const uint8_t* data, size_t end, size_t& pos) {
-  while (pos < end && data[pos] != 0) ++pos;
-  if (pos >= end) return false;
-  ++pos;
-  return true;
+uint64_t readU64(const uint8_t* p) {
+  uint64_t value = 0;
+  for (int i = 7; i >= 0; --i) value = (value << 8) | p[i];
+  return value;
 }
 
-// PONG payload: timestamp(i64), server_time(i64), device_name\0,
-// address\0, firmware_version\0. Only the complete address is needed by the
-// stream router; a basic legacy PONG intentionally remains command-only.
-bool parsePongAddress(const uint8_t* packet, size_t packetLength, char* address,
-                      size_t capacity) {
-  if (!packet || packetLength < hapbeat::HEADER_SIZE + 16) return false;
-  const size_t payloadLength = (size_t)packet[6] | ((size_t)packet[7] << 8);
-  const size_t packetEnd = hapbeat::HEADER_SIZE + payloadLength;
-  if (packetEnd > packetLength || payloadLength < 16) return false;
+uint32_t readU32(const uint8_t* p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
 
-  size_t pos = hapbeat::HEADER_SIZE + 16;
-  if (!skipCString(packet, packetEnd, pos)) return false;
-  if (!readCString(packet, packetEnd, pos, address, capacity)) return false;
-  return address[0] != '\0';
+// One bit per ERROR code for the once-per-device report.
+uint16_t errorBit(uint16_t code) {
+  if (code >= 0x0001 && code <= 0x0003) return (uint16_t)(1u << (code - 1));
+  if (code >= 0x0010 && code <= 0x0017) return (uint16_t)(1u << (3 + code - 0x10));
+  return (uint16_t)(1u << 15);
+}
+
+HapbeatDeferredReason strongerReason(HapbeatDeferredReason current,
+                                     HapbeatDeferredReason candidate) {
+  // Superseded > LeaseUnavailable > UnknownClass > NoResolvedEndpoint, which
+  // is the enum order (sdk-multi-stream.md section 3).
+  return (uint8_t)candidate > (uint8_t)current ? candidate : current;
 }
 
 }  // namespace
@@ -177,6 +199,7 @@ bool Hapbeat::begin(uint16_t port, const char* appName) {
     _appName[hapbeat::MAX_APP_NAME_LEN] = '\0';
   }
   _udp.begin(_port);  // bind for both sends and PONG discovery replies
+  newIncarnation();  // every begin() is a new connection (stream-session.md)
   _ready = true;
   if (_appName[0]) connectStatus(true);
   return true;
@@ -248,9 +271,9 @@ uint8_t Hapbeat::aliveCount() const {
   return count;
 }
 
-void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
-                             bool pinned) {
-  if ((uint32_t)ip == 0) return;
+int8_t Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
+                               bool pinned) {
+  if ((uint32_t)ip == 0) return -1;
   if (port == 0) port = _port;
   const bool hasAddress = address && address[0];
   const uint64_t now = extendedMillis();
@@ -304,9 +327,12 @@ void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
     }
   }
 
+  const bool fresh = slot < 0;
   if (slot < 0) slot = freeSlot >= 0 ? freeSlot : oldest;
-  if (slot < 0) return;
+  if (slot < 0) return -1;
   KnownDevice& device = _devices[slot];
+  // A free or evicted slot holds another device's class and lease.
+  if (fresh) device = KnownDevice();
   device.used = true;
   device.ip = ip;
   device.port = port;
@@ -314,6 +340,14 @@ void Hapbeat::rememberDevice(IPAddress ip, uint16_t port, const char* address,
   device.fails = 0;
   if (pinned) device.pinned = true;
   if (hasAddress) copyAddress(device.address, sizeof(device.address), address);
+  return slot;
+}
+
+int8_t Hapbeat::findDevice(IPAddress ip, uint16_t port) const {
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+    if (_devices[i].used && _devices[i].ip == ip && _devices[i].port == port)
+      return (int8_t)i;
+  return -1;
 }
 
 void Hapbeat::pollPongs() {
@@ -322,29 +356,364 @@ void Hapbeat::pollPongs() {
     const int packetSize = _udp.parsePacket();
     if (packetSize <= 0) return;
     const IPAddress remoteIp = _udp.remoteIP();
-    uint16_t remotePort = _udp.remotePort();
-    if (remotePort == 0) remotePort = _port;
-    uint8_t packet[kPongBufferSize];
-    const int readSize = _udp.read(packet, sizeof(packet));
+    const uint16_t sourcePort = _udp.remotePort();
+    const int readSize = _udp.read(_rxBuffer, sizeof(_rxBuffer));
     _udp.flush();
-    if (packetSize > (int)sizeof(packet) || readSize < (int)hapbeat::HEADER_SIZE)
+    if (packetSize > (int)sizeof(_rxBuffer) ||
+        readSize < (int)hapbeat::HEADER_SIZE)
       continue;
-
-    const bool magicOk = packet[0] == (uint8_t)(hapbeat::MAGIC & 0xFF) &&
-                         packet[1] == (uint8_t)((hapbeat::MAGIC >> 8) & 0xFF);
-    if (!magicOk || packet[2] != hapbeat::VERSION ||
-        packet[3] != hapbeat::CMD_PONG)
-      continue;
-    const size_t packetLength = (size_t)readSize;
-    const size_t payloadLength = (size_t)packet[6] | ((size_t)packet[7] << 8);
-    if (hapbeat::HEADER_SIZE + payloadLength > packetLength || payloadLength < 16)
-      continue;
-
-    char address[hapbeat::MAX_DEVICE_ADDRESS_LEN + 1] = {0};
-    const bool hasAddress = parsePongAddress(packet, packetLength, address,
-                                              sizeof(address));
-    rememberDevice(remoteIp, remotePort, hasAddress ? address : "");
+    const size_t length = (size_t)readSize;
+    if (_rxBuffer[3] == hapbeat::CMD_PONG) {
+      handlePong(remoteIp, sourcePort ? sourcePort : _port, length);
+    } else if (_rxBuffer[3] == hapbeat::CMD_ERROR) {
+      handleError(remoteIp, sourcePort, length);
+    }
   }
+}
+
+const Hapbeat::PendingPing* Hapbeat::matchPending(uint16_t seq,
+                                                  int64_t timestampUs,
+                                                  IPAddress ip,
+                                                  uint16_t port) const {
+  if (timestampUs == 0) return nullptr;  // unsolicited identity PONG
+  const uint64_t now = extendedMillis();
+  for (uint8_t i = 0; i < MAX_PENDING_PINGS; ++i) {
+    const PendingPing& pending = _pendingPings[i];
+    if (pending.used && pending.seq == seq &&
+        pending.timestampUs == timestampUs && pending.ip == ip &&
+        pending.port == port && now - pending.sentMs < PENDING_PING_MAX_AGE_MS)
+      return &pending;
+  }
+  return nullptr;
+}
+
+// Class and lease change only on a matched direct reply to this incarnation's
+// extended PING (same seq, echoed timestamp, request destination, echoed
+// incarnation) that is newer than the last accepted one (stream-session.md
+// Discovery lease and Receiver classification).
+void Hapbeat::handlePong(IPAddress ip, uint16_t port, size_t length) {
+  hapbeat::PongInfo info;
+  if (!hapbeat::parsePong(_rxBuffer, length, info)) return;
+  const char* address = info.hasAddress ? info.address : "";
+  const PendingPing* pending =
+      matchPending(info.seq, info.timestampUs, ip, port);
+
+  if (info.tail == hapbeat::PongTail::Ignored) {
+    // Not a lease reply this version can read, and not proof of Stream Gen 1.
+    const int8_t slot = rememberDevice(ip, port, address);
+    if (slot >= 0 && !_devices[slot].ignoredWarned) {
+      _devices[slot].ignoredWarned = true;
+      warn(ip,
+           "PONG stream tail not understood (newer firmware major?); streams "
+           "to it stay deferred");
+    }
+    return;
+  }
+
+  if (info.tail == hapbeat::PongTail::Gen2) {
+    // A lease tail that fails the correlation is dropped whole, address and
+    // liveness included (a retired request or a previous incarnation).
+    if (!pending || _incarnation == 0 ||
+        info.echoedIncarnation != _incarnation ||
+        pending->incarnation != info.echoedIncarnation)
+      return;
+    const int8_t existing = findDevice(ip, port);
+    if (existing >= 0 &&
+        info.timestampUs <= _devices[existing].lastAcceptedTimestampUs)
+      return;  // older than an accepted reply: never roll the lease back
+    const uint64_t incarnation = pending->incarnation;
+    const int8_t slot = rememberDevice(ip, port, address);
+    if (slot < 0) return;
+    KnownDevice& device = _devices[slot];
+    bool valid = info.leaseValid;
+    bool superseded = info.superseded;
+    // A superseded writer stays deferred until the device re-issues it a
+    // ticket (lease_reissued) or the sketch reacquires ownership; a later
+    // periodic reply is not an implicit takeover.
+    const bool keepSuperseded =
+        device.streamClass == HapbeatStreamClass::Gen2 && device.superseded &&
+        device.leaseIncarnation == incarnation &&
+        !(valid && !superseded && info.reissued);
+    if (keepSuperseded) {
+      valid = false;
+      superseded = true;
+    } else if (device.bootId != info.bootId || device.ticket != info.ticket) {
+      device.bootId = info.bootId;
+      device.ticket = info.ticket;
+      device.lastGeneration = 0;
+    }
+    if (superseded && !device.superseded)
+      warn(ip,
+           "stream lease superseded by another application; streams to it "
+           "stay deferred until it hands the device back or "
+           "reacquireStreamOwnership() is called");
+    device.streamClass = HapbeatStreamClass::Gen2;
+    device.leaseValid = valid;
+    device.superseded = superseded;
+    device.leaseIncarnation = incarnation;
+    device.lastAcceptedTimestampUs = info.timestampUs;
+    return;
+  }
+
+  // Nothing after volume_wiper. Firmware before Stream Gen 2 cannot echo the
+  // incarnation, so the request itself must be this incarnation's.
+  const int8_t slot = rememberDevice(ip, port, address);
+  if (slot < 0 || !pending || _incarnation == 0 ||
+      pending->incarnation != _incarnation)
+    return;
+  KnownDevice& device = _devices[slot];
+  if (info.timestampUs <= device.lastAcceptedTimestampUs) return;
+  device.streamClass = HapbeatStreamClass::Gen1;
+  device.leaseValid = false;
+  device.superseded = false;
+  device.bootId = 0;
+  device.ticket = 0;
+  device.lastGeneration = 0;
+  device.leaseIncarnation = pending->incarnation;
+  device.lastAcceptedTimestampUs = info.timestampUs;
+}
+
+// ERROR (message-format.md 0xFF): only from a known device on the Hapbeat
+// port, and a stream code only when its detail is the envelope of this
+// library's current or just-ended session there. Handled per endpoint.
+void Hapbeat::handleError(IPAddress ip, uint16_t port, size_t length) {
+  if (port != _port) return;
+  const int8_t slot = findDevice(ip, port);
+  if (slot < 0) return;
+  hapbeat::ErrorInfo error;
+  if (!hapbeat::parseError(_rxBuffer, length, error)) return;
+  KnownDevice& device = _devices[slot];
+
+  StreamSession* current = nullptr;
+  if (error.code >= hapbeat::ERR_STREAM_LEASE_INVALID &&
+      error.code <= hapbeat::ERR_STREAM_TARGET_MISMATCH) {
+    if (!error.hasReference ||
+        error.detailLength != hapbeat::STREAM_ENVELOPE_SIZE)
+      return;
+    const uint64_t bootId = readU64(error.detail);
+    const uint32_t ticket = readU32(error.detail + 8);
+    const uint32_t generation = readU32(error.detail + 12);
+    for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+      StreamSession& session = _sessions[s];
+      if (session.used && session.gen2 && session.generation != 0 &&
+          session.endpoint.ip == ip && session.endpoint.port == port &&
+          session.bootId == bootId && session.ticket == ticket &&
+          session.generation == generation)
+        current = &session;
+    }
+    const bool ended = device.endedGeneration != 0 &&
+                       device.endedBootId == bootId &&
+                       device.endedTicket == ticket &&
+                       device.endedGeneration == generation;
+    if (!current && !ended) return;
+  }
+
+  const uint16_t bit = errorBit(error.code);
+  if (!(device.errorWarned & bit)) {
+    device.errorWarned |= bit;
+    warn(ip, "device ERROR %s (0x%04x): %s", hapbeat::errorName(error.code),
+         (unsigned)error.code, error.message);
+  }
+
+  const uint64_t now = extendedMillis();
+  switch (error.code) {
+    case hapbeat::ERR_STREAM_GEN_UNSUPPORTED:
+      // The device was updated past Stream Gen 1: classify it again.
+      if (device.streamClass != HapbeatStreamClass::Gen1) break;
+      device.streamClass = HapbeatStreamClass::Unknown;
+      sendLeasePing(device, now);
+      break;
+    case hapbeat::ERR_STREAM_LEASE_INVALID:
+      if (device.streamClass != HapbeatStreamClass::Gen2) break;
+      device.leaseValid = false;
+      sendLeasePing(device, now);
+      break;
+    case hapbeat::ERR_STREAM_SUPERSEDED:
+      // Defer the device; no automatic takeover.
+      if (device.streamClass != HapbeatStreamClass::Gen2) break;
+      device.leaseValid = false;
+      device.superseded = true;
+      break;
+    case hapbeat::ERR_STREAM_NOT_STARTED:
+      if (current) sendStreamBegin(*current, now);
+      break;
+    default:
+      // Reported only. STREAM_TIMED_OUT, STREAM_STOPPED and
+      // STREAM_TARGET_MISMATCH are not acted on by this version (README).
+      break;
+  }
+}
+
+int64_t Hapbeat::nextPingTimestamp() {
+  // Strictly increasing and never 0 (0 marks an unsolicited PONG).
+  int64_t timestamp = (int64_t)extendedMillis() * 1000;
+  if (timestamp <= _lastPingTimestampUs) timestamp = _lastPingTimestampUs + 1;
+  _lastPingTimestampUs = timestamp;
+  return timestamp;
+}
+
+void Hapbeat::newIncarnation() {
+  uint64_t value = 0;
+  while (value == 0 || value == _incarnation) value = randomU64();
+  _incarnation = value;
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i) _devices[i].leasePinged = false;
+}
+
+bool Hapbeat::leasePingWanted(const KnownDevice& device, uint64_t now) const {
+  if (!isAlive(device) || !device.address[0] ||
+      (uint32_t)device.ip == 0xffffffffu)
+    return false;
+  if (device.hadSession && now - device.lastSessionMs < LEASE_TTL_MS)
+    return true;
+  for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
+    if (_sources[i].used &&
+        hapbeat::addressMatches(_sources[i].target, device.address))
+      return true;
+  return false;
+}
+
+// Extended PINGs go by unicast only, to the devices the sources target or
+// that had a session within one lease TTL (stream-session.md Discovery lease).
+void Hapbeat::serviceLeasePings(uint64_t now) {
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    if (!_sessions[s].used) continue;
+    const int8_t slot =
+        findDevice(_sessions[s].endpoint.ip, _sessions[s].endpoint.port);
+    if (slot < 0) continue;
+    _devices[slot].hadSession = true;
+    _devices[slot].lastSessionMs = now;
+  }
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i) {
+    KnownDevice& device = _devices[i];
+    if (!leasePingWanted(device, now)) continue;
+    const HapbeatLeaseState lease = leaseState(device);
+    const bool retry =
+        device.streamClass == HapbeatStreamClass::Unknown ||
+        lease == HapbeatLeaseState::Unavailable;
+    const uint32_t interval = retry ? LEASE_RETRY_MS : LEASE_REFRESH_MS;
+    if (device.leasePinged && now - device.lastLeasePingMs < interval) continue;
+    sendLeasePing(device, now);
+  }
+}
+
+void Hapbeat::sendLeasePing(KnownDevice& device, uint64_t now) {
+  uint8_t packet[hapbeat::HEADER_SIZE + 16];
+  const uint16_t seq = nextSeq();
+  const int64_t timestamp = nextPingTimestamp();
+  const size_t length = hapbeat::buildPingExtended(packet, sizeof(packet), seq,
+                                                   timestamp, _incarnation);
+  device.leasePinged = true;
+  device.lastLeasePingMs = now;
+  if (length == 0) return;
+
+  // Keep the request until it ages out; it is not consumed by its reply.
+  int8_t slot = -1;
+  for (uint8_t i = 0; i < MAX_PENDING_PINGS && slot < 0; ++i)
+    if (!_pendingPings[i].used ||
+        now - _pendingPings[i].sentMs >= PENDING_PING_MAX_AGE_MS)
+      slot = (int8_t)i;
+  if (slot < 0) {
+    slot = 0;
+    for (uint8_t i = 1; i < MAX_PENDING_PINGS; ++i)
+      if (_pendingPings[i].sentMs < _pendingPings[slot].sentMs) slot = (int8_t)i;
+  }
+  PendingPing& pending = _pendingPings[slot];
+  pending.used = true;
+  pending.seq = seq;
+  pending.timestampUs = timestamp;
+  pending.ip = device.ip;
+  pending.port = device.port;
+  pending.incarnation = _incarnation;
+  pending.sentMs = now;
+  sendTo(packet, length, device.ip, device.port);
+}
+
+Hapbeat::EndpointMode Hapbeat::endpointMode(
+    const StreamEndpoint& endpoint) const {
+  const int8_t slot = findDevice(endpoint.ip, endpoint.port);
+  if (slot < 0) return EndpointMode::Unknown;
+  const KnownDevice& device = _devices[slot];
+  switch (device.streamClass) {
+    case HapbeatStreamClass::Gen1:
+      return EndpointMode::Gen1;
+    case HapbeatStreamClass::Gen2:
+      switch (leaseState(device)) {
+        case HapbeatLeaseState::Valid: return EndpointMode::Gen2;
+        case HapbeatLeaseState::Superseded: return EndpointMode::Superseded;
+        default: return EndpointMode::LeaseUnavailable;
+      }
+    default:
+      return EndpointMode::Unknown;
+  }
+}
+
+// Whether a session may keep streaming to this endpoint in its own format
+// and identity: Stream Gen 1 to a Gen 1 device, or Stream Gen 2 under the
+// device's current usable lease.
+bool Hapbeat::sessionCurrent(const StreamSession& session,
+                             const StreamEndpoint& endpoint) const {
+  const EndpointMode mode = endpointMode(endpoint);
+  if (!session.gen2) return mode == EndpointMode::Gen1;
+  if (mode != EndpointMode::Gen2 || session.generation == 0) return false;
+  const int8_t slot = findDevice(endpoint.ip, endpoint.port);
+  return slot >= 0 && _devices[slot].bootId == session.bootId &&
+         _devices[slot].ticket == session.ticket;
+}
+
+HapbeatLeaseState Hapbeat::leaseState(const KnownDevice& device) const {
+  if (device.streamClass != HapbeatStreamClass::Gen2)
+    return HapbeatLeaseState::None;
+  // A lease of an earlier incarnation is not ours any more.
+  if (device.leaseIncarnation != _incarnation)
+    return HapbeatLeaseState::Unavailable;
+  if (device.superseded) return HapbeatLeaseState::Superseded;
+  if (device.leaseValid && device.bootId != 0 && device.ticket != 0)
+    return HapbeatLeaseState::Valid;
+  return HapbeatLeaseState::Unavailable;
+}
+
+void Hapbeat::warn(IPAddress ip, const char* format, ...) {
+  if (!_warningHandler) return;
+  int length = snprintf(_warningBuffer, sizeof(_warningBuffer),
+                        "Hapbeat %u.%u.%u.%u: ", (unsigned)ip[0],
+                        (unsigned)ip[1], (unsigned)ip[2], (unsigned)ip[3]);
+  if (length < 0) length = 0;
+  if ((size_t)length < sizeof(_warningBuffer)) {
+    va_list args;
+    va_start(args, format);
+    vsnprintf(_warningBuffer + length, sizeof(_warningBuffer) - (size_t)length,
+              format, args);
+    va_end(args);
+  }
+  _warningHandler(_warningBuffer);
+}
+
+HapbeatStreamClass Hapbeat::streamClass(IPAddress ip) const {
+  for (uint8_t i = 0; i < MAX_DEVICES; ++i)
+    if (_devices[i].used && _devices[i].ip == ip) return _devices[i].streamClass;
+  return HapbeatStreamClass::Unknown;
+}
+
+uint8_t Hapbeat::streamEndpoints(HapbeatStreamEndpointInfo* out,
+                                 uint8_t maxOut) const {
+  if (!out) return 0;
+  uint8_t count = 0;
+  for (uint8_t i = 0; i < MAX_DEVICES && count < maxOut; ++i) {
+    const KnownDevice& device = _devices[i];
+    if (!isAlive(device) || !device.address[0]) continue;
+    HapbeatStreamEndpointInfo& info = out[count++];
+    copyAddress(info.address, sizeof(info.address), device.address);
+    info.ip = device.ip;
+    info.port = device.port;
+    info.streamClass = device.streamClass;
+    info.leaseState = leaseState(device);
+  }
+  return count;
+}
+
+void Hapbeat::reacquireStreamOwnership() {
+  newIncarnation();
+  if (_ready) serviceLeasePings(extendedMillis());
 }
 
 void Hapbeat::pollPongsThrottled() {
@@ -424,8 +793,9 @@ void Hapbeat::stopAll(const char* target) {
 
 void Hapbeat::ping() {
   uint8_t packet[16];
-  const size_t length = hapbeat::buildPing(packet, sizeof(packet), nextSeq(),
-                                           (int64_t)extendedMillis() * 1000);
+  const uint16_t seq = nextSeq();
+  const size_t length = hapbeat::buildPing(packet, sizeof(packet), seq,
+                                           nextPingTimestamp());
   sendPacket(packet, length);  // discovery remains broadcast
   if (_broadcastOnly) return;
   for (uint8_t i = 0; i < MAX_DEVICES; ++i)
@@ -517,6 +887,7 @@ void Hapbeat::tick() {
   if (!_ready) return;
   pollPongs();
   const uint64_t now = extendedMillis();
+  serviceLeasePings(now);
   reconcileStreams(now);
   pumpStreams(now);
 }
@@ -628,12 +999,105 @@ void Hapbeat::removeSession(uint8_t slot) {
   _sessions[slot] = StreamSession();
 }
 
-bool Hapbeat::sendStreamBegin(StreamSession& session) {
+// BEGIN carries the endpoint's current address (it may have changed since the
+// session began). A repeated Stream Gen 2 BEGIN is the same tuple.
+bool Hapbeat::sendStreamBegin(StreamSession& session, uint64_t now) {
   uint8_t packet[128];
-  const size_t length = hapbeat::buildStreamBegin(
-      packet, sizeof(packet), nextSeq(), STREAM_SAMPLE_RATE, STREAM_CHANNELS,
-      hapbeat::FORMAT_PCM16, 0, 1.0f, session.endpoint.address);
+  size_t length = 0;
+  if (session.gen2) {
+    if (session.generation == 0) return false;
+    length = hapbeat::buildStreamBeginGen2(
+        packet, sizeof(packet), nextSeq(), session.bootId, session.ticket,
+        session.generation, STREAM_SAMPLE_RATE, STREAM_CHANNELS,
+        hapbeat::FORMAT_PCM16, 0, 1.0f, session.endpoint.address);
+  } else {
+    length = hapbeat::buildStreamBegin(
+        packet, sizeof(packet), nextSeq(), STREAM_SAMPLE_RATE, STREAM_CHANNELS,
+        hapbeat::FORMAT_PCM16, 0, 1.0f, session.endpoint.address);
+  }
+  session.lastBeginMs = now;
   return length != 0 && sendStreamTo(packet, length, session.endpoint);
+}
+
+// END once, in the session's own format and identity. Only a Stream Gen 1 END
+// starts the 300 ms guard for that endpoint; a Gen 2 END is remembered so an
+// ERROR about the just-ended session is still recognized.
+void Hapbeat::sendStreamEnd(StreamSession& session, uint64_t now) {
+  uint8_t packet[hapbeat::HEADER_SIZE + hapbeat::STREAM_ENVELOPE_SIZE];
+  if (!session.gen2) {
+    const size_t length =
+        hapbeat::buildStreamEnd(packet, sizeof(packet), nextSeq());
+    sendStreamTo(packet, length, session.endpoint);
+    recordEnd(session.endpoint, now);
+    return;
+  }
+  if (session.generation == 0) return;  // suspended: already ended
+  const size_t length = hapbeat::buildStreamEndGen2(
+      packet, sizeof(packet), nextSeq(), session.bootId, session.ticket,
+      session.generation);
+  sendStreamTo(packet, length, session.endpoint);
+  const int8_t slot = findDevice(session.endpoint.ip, session.endpoint.port);
+  if (slot < 0) return;
+  _devices[slot].endedBootId = session.bootId;
+  _devices[slot].endedTicket = session.ticket;
+  _devices[slot].endedGeneration = session.generation;
+}
+
+// Next generation under the device's current lease. Generations are never
+// reused; when none is left a fresh incarnation obtains a new ticket.
+bool Hapbeat::allocateGeneration(StreamSession& session, uint64_t now) {
+  (void)now;
+  const int8_t slot = findDevice(session.endpoint.ip, session.endpoint.port);
+  if (slot < 0) return false;
+  KnownDevice& device = _devices[slot];
+  if (device.lastGeneration >= kMaxGeneration) {
+    newIncarnation();
+    return false;
+  }
+  session.bootId = device.bootId;
+  session.ticket = device.ticket;
+  session.generation = ++device.lastGeneration;
+  session.dataBlocksSent = 0;
+  session.lastDataMs = 0;
+  return true;
+}
+
+bool Hapbeat::openSession(uint8_t slot, const StreamEndpoint& endpoint,
+                          EndpointMode mode, uint64_t now) {
+  StreamSession& session = _sessions[slot];
+  session = StreamSession();
+  session.used = true;
+  session.endpoint = endpoint;
+  session.startedMs = now;
+  if (mode == EndpointMode::Gen2) {
+    session.gen2 = true;
+    if (!allocateGeneration(session, now)) {
+      session = StreamSession();
+      return false;
+    }
+  }
+  // No fallback is allowed. The session remains endpoint-scoped even if this
+  // individual unicast attempt is rejected by the TX queue.
+  session.beginSent = sendStreamBegin(session, now);
+  return true;
+}
+
+// End a Stream Gen 2 session under its own identity and continue its sources
+// from their cursors under the next generation of the device's current lease
+// (a new ticket of the same boot, or the own-gap rule). Pacing restarts, so
+// the time the sender could not send is not sent in one burst.
+void Hapbeat::restartSession(StreamSession& session, uint64_t now) {
+  sendStreamEnd(session, now);
+  session.generation = 0;
+  session.beginSent = false;
+  session.byteOffset = 0;
+  session.framesSent = 0;
+  session.startedMs = now;
+  if (!allocateGeneration(session, now)) {
+    session.suspendedMs = now;  // resumes under the next lease of this boot
+    return;
+  }
+  session.beginSent = sendStreamBegin(session, now);
 }
 
 bool Hapbeat::sourceCompletedEverywhere(
@@ -723,7 +1187,8 @@ void Hapbeat::reconcileStreams(uint64_t now) {
 
   // Address-only migration is allowed only for one old session and one new
   // endpoint. Ambiguous stale/live sessions (including same-address devices
-  // on different IPs) are never given a cursor-preserving migration.
+  // on different IPs) are never given a cursor-preserving migration, nor is a
+  // session whose format or lease the new route does not have.
   uint8_t addressCandidate[MAX_STREAM_SESSIONS] = {0};
   uint8_t addressCount[MAX_STREAM_SESSIONS] = {0};
   uint8_t addressAvailableCount[MAX_STREAM_SESSIONS] = {0};
@@ -732,7 +1197,8 @@ void Hapbeat::reconcileStreams(uint64_t now) {
     if (!_sessions[s].used || sessionClaimed[s] || routeCount[s] != 0)
       continue;
     for (uint8_t e = 0; e < endpointCount; ++e) {
-      if (strcmp(_sessions[s].endpoint.address, endpoints[e].address) != 0)
+      if (strcmp(_sessions[s].endpoint.address, endpoints[e].address) != 0 ||
+          !sessionCurrent(_sessions[s], endpoints[e]))
         continue;
       ++addressCount[s];
       if (!claimed[e]) {
@@ -767,12 +1233,56 @@ void Hapbeat::reconcileStreams(uint64_t now) {
     }
   }
 
+  // A matched reply or an ERROR may have changed an endpoint's class or
+  // lease. End the running session now, in the format and identity it began
+  // with, before a session in the new mode can start (stream-session.md:
+  // lease state changes must propagate; a class change ends the old-format
+  // session first). A new ticket of the same boot continues the cursors; a
+  // lease that became unavailable suspends the session with its cursors for
+  // the next lease of that boot; a superseded endpoint is not re-taken.
+  for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
+    StreamSession& session = _sessions[s];
+    if (!session.used) continue;
+    const EndpointMode mode = endpointMode(session.endpoint);
+    const int8_t device = findDevice(session.endpoint.ip, session.endpoint.port);
+    const bool sameBoot = session.gen2 && mode == EndpointMode::Gen2 &&
+                          device >= 0 && _devices[device].bootId == session.bootId;
+    if (session.gen2 && session.generation == 0) {
+      if (sameBoot) {
+        if (allocateGeneration(session, now)) {
+          session.byteOffset = 0;
+          session.framesSent = 0;
+          session.startedMs = now;
+          session.beginSent = sendStreamBegin(session, now);
+        }
+      } else if (mode != EndpointMode::LeaseUnavailable ||
+                 now - session.suspendedMs >= LEASE_TTL_MS) {
+        removeSession(s);
+      }
+      continue;
+    }
+    if (sessionCurrent(session, session.endpoint)) continue;
+    if (sameBoot) {
+      restartSession(session, now);
+      continue;
+    }
+    if (session.beginSent) sendStreamEnd(session, now);
+    if (session.gen2 && mode == EndpointMode::LeaseUnavailable) {
+      session.generation = 0;
+      session.beginSent = false;
+      session.suspendedMs = now;
+    } else {
+      removeSession(s);
+    }
+  }
+
   // BEGIN is an exact-unicast handshake. A failed TX must leave the session
   // deferred and retry on the next cooperative tick before any DATA is sent.
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
     StreamSession& session = _sessions[s];
-    if (session.used && !session.empty && !session.beginSent)
-      session.beginSent = sendStreamBegin(session);
+    if (session.used && !session.empty && !session.beginSent &&
+        !(session.gen2 && session.generation == 0))
+      session.beginSent = sendStreamBegin(session, now);
   }
 
   // Remove stale source memberships while preserving an empty session during
@@ -799,27 +1309,49 @@ void Hapbeat::reconcileStreams(uint64_t now) {
   }
 
   // Resolve every source independently against every exact address endpoint.
+  // Each endpoint gets the format of its class: Stream Gen 2 under its lease,
+  // Stream Gen 1 with the 300 ms guard, or nothing until it is classified.
   for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
     SineSource& source = _sources[i];
     if (!source.used) continue;
     bool assigned = false;
+    bool guarded = false;
+    HapbeatDeferredReason reason = HapbeatDeferredReason::NoResolvedEndpoint;
     for (uint8_t e = 0; e < endpointCount; ++e) {
       if (!sourceMatches(source, endpoints[e])) continue;
       int8_t sessionSlot = findSession(endpoints[e]);
-      if (sessionSlot < 0) {
-        if (endpointCoolingDown(endpoints[e], now)) continue;
+      const bool suspended = sessionSlot >= 0 && _sessions[sessionSlot].gen2 &&
+                             _sessions[sessionSlot].generation == 0;
+      if (suspended) {
+        reason = strongerReason(reason, HapbeatDeferredReason::LeaseUnavailable);
+      } else if (sessionSlot < 0) {
+        const EndpointMode mode = endpointMode(endpoints[e]);
+        if (mode == EndpointMode::Unknown) {
+          reason = strongerReason(reason, HapbeatDeferredReason::UnknownClass);
+          continue;
+        }
+        if (mode == EndpointMode::LeaseUnavailable) {
+          reason = strongerReason(reason, HapbeatDeferredReason::LeaseUnavailable);
+          continue;
+        }
+        if (mode == EndpointMode::Superseded) {
+          reason = strongerReason(reason, HapbeatDeferredReason::Superseded);
+          continue;
+        }
+        // Waiting out the Stream Gen 1 guard counts as Active (section 3).
+        if (mode == EndpointMode::Gen1 && endpointCoolingDown(endpoints[e], now)) {
+          guarded = true;
+          continue;
+        }
         for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
-          if (!_sessions[s].used) {
+          if (_sessions[s].used) continue;
+          if (openSession(s, endpoints[e], mode, now)) {
             sessionSlot = s;
-            _sessions[s] = StreamSession();
-            _sessions[s].used = true;
-            _sessions[s].endpoint = endpoints[e];
-            _sessions[s].startedMs = now;
-            // No fallback is allowed. The session remains endpoint-scoped even
-            // if this individual unicast attempt is rejected by the TX queue.
-            _sessions[s].beginSent = sendStreamBegin(_sessions[s]);
-            break;
+          } else {
+            reason = strongerReason(reason,
+                                    HapbeatDeferredReason::LeaseUnavailable);
           }
+          break;
         }
       }
       if (sessionSlot < 0) continue;  // fixed session pool is full
@@ -839,12 +1371,12 @@ void Hapbeat::reconcileStreams(uint64_t now) {
         session.attached[i] = true;
         session.empty = false;
       }
-      assigned = assigned || session.beginSent;
+      if (!suspended) assigned = assigned || session.beginSent;
     }
-    source.status = assigned ? HapbeatPlaybackStatus::Active
-                             : HapbeatPlaybackStatus::Deferred;
-    source.reason = assigned ? HapbeatDeferredReason::None
-                             : HapbeatDeferredReason::NoResolvedEndpoint;
+    const bool active = assigned || guarded;
+    source.status = active ? HapbeatPlaybackStatus::Active
+                           : HapbeatPlaybackStatus::Deferred;
+    source.reason = active ? HapbeatDeferredReason::None : reason;
   }
 }
 
@@ -889,28 +1421,47 @@ void Hapbeat::mixSession(StreamSession& session, uint16_t frames,
       finishedMask |= (uint8_t)(1u << sourceSlot);
   }
 
+  // Stream Gen 2 DATA puts the 16-byte envelope before the offset.
+  const size_t audioStart = hapbeat::HEADER_SIZE +
+                            (session.gen2 ? hapbeat::STREAM_ENVELOPE_SIZE : 0) + 4;
   for (uint16_t frame = 0; frame < frames; ++frame) {
     const int16_t leftSample = saturatePcm16(left[frame]);
     const int16_t rightSample = saturatePcm16(right[frame]);
-    const size_t offset = (size_t)frame * 4;
-    packet[hapbeat::HEADER_SIZE + 4 + offset] = (uint8_t)(leftSample & 0xFF);
-    packet[hapbeat::HEADER_SIZE + 5 + offset] = (uint8_t)((leftSample >> 8) & 0xFF);
-    packet[hapbeat::HEADER_SIZE + 6 + offset] = (uint8_t)(rightSample & 0xFF);
-    packet[hapbeat::HEADER_SIZE + 7 + offset] = (uint8_t)((rightSample >> 8) & 0xFF);
+    const size_t offset = audioStart + (size_t)frame * 4;
+    packet[offset] = (uint8_t)(leftSample & 0xFF);
+    packet[offset + 1] = (uint8_t)((leftSample >> 8) & 0xFF);
+    packet[offset + 2] = (uint8_t)(rightSample & 0xFF);
+    packet[offset + 3] = (uint8_t)((rightSample >> 8) & 0xFF);
   }
   const size_t audioLength = (size_t)frames * STREAM_CHANNELS * 2;
-  // packet[12..] already contains the raw data; the builder writes only the
-  // header/offset before copying that same range into place.
-  (void)hapbeat::buildStreamData(packet, packetCapacity, nextSeq(),
-                                 session.byteOffset,
-                                 packet + hapbeat::HEADER_SIZE + 4, audioLength);
+  // packet[audioStart..] already contains the raw data; the builder writes
+  // only the header/envelope/offset before moving that same range into place.
+  if (session.gen2) {
+    (void)hapbeat::buildStreamDataGen2(
+        packet, packetCapacity, nextSeq(), session.bootId, session.ticket,
+        session.generation, session.byteOffset, packet + audioStart,
+        audioLength);
+  } else {
+    (void)hapbeat::buildStreamData(packet, packetCapacity, nextSeq(),
+                                   session.byteOffset, packet + audioStart,
+                                   audioLength);
+  }
 }
 
 void Hapbeat::pumpStreams(uint64_t now) {
-  uint8_t packet[hapbeat::HEADER_SIZE + 4 + STREAM_CHUNK_FRAMES * 4];
+  uint8_t packet[hapbeat::HEADER_SIZE + hapbeat::STREAM_ENVELOPE_SIZE + 4 +
+                 STREAM_CHUNK_FRAMES * 4];
   for (uint8_t s = 0; s < MAX_STREAM_SESSIONS; ++s) {
     StreamSession& session = _sessions[s];
     if (!session.used) continue;
+    if (session.gen2 && session.generation == 0) {
+      // Suspended until the next lease: no DATA. Forget it once empty.
+      bool hasAttached = false;
+      for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
+        if (session.attached[i]) hasAttached = true;
+      if (!hasAttached) removeSession(s);
+      continue;
+    }
     if (!session.beginSent) {
       bool hasAttached = false;
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
@@ -943,6 +1494,17 @@ void Hapbeat::pumpStreams(uint64_t now) {
                                                     : (uint16_t)remaining;
       }
     }
+    if (session.gen2) {
+      // Own gap (Sender requirements 3): the device may have timed this
+      // generation out, so continue under the next one before more DATA.
+      if (hasAttached && session.dataBlocksSent > 0 &&
+          now - session.lastDataMs >= OWN_GAP_RESTART_MS) {
+        restartSession(session, now);
+        if (session.generation == 0 || !session.beginSent) continue;
+      }
+      if (now - session.lastBeginMs >= BEGIN_REPEAT_MS)
+        sendStreamBegin(session, now);
+    }
     const uint64_t elapsedMs = now - session.startedMs;
     const uint64_t wanted =
         ((uint64_t)elapsedMs * STREAM_SAMPLE_RATE) / 1000 +
@@ -969,13 +1531,19 @@ void Hapbeat::pumpStreams(uint64_t now) {
       if (maximum == 0) break;
       if (maximum > STREAM_CHUNK_FRAMES) maximum = STREAM_CHUNK_FRAMES;
 
+      // Stream Gen 2 repeats the same BEGIN before each of the first DATA
+      // blocks; Stream Gen 1 firmware may flush on BEGIN, so never there.
+      if (session.gen2 && session.dataBlocksSent < BEGIN_REPEAT_COUNT)
+        sendStreamBegin(session, now);
       uint64_t oldCursors[MAX_STREAM_SOURCES];
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
         oldCursors[i] = session.cursors[i];
       uint8_t finishedMask = 0;
       mixSession(session, maximum, packet, sizeof(packet), finishedMask);
-      const size_t packetLength = hapbeat::HEADER_SIZE + 4 +
-                                  (size_t)maximum * STREAM_CHANNELS * 2;
+      const size_t packetLength =
+          hapbeat::HEADER_SIZE +
+          (session.gen2 ? hapbeat::STREAM_ENVELOPE_SIZE : 0) + 4 +
+          (size_t)maximum * STREAM_CHANNELS * 2;
       if (!sendStreamTo(packet, packetLength, session.endpoint)) {
         for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i)
           session.cursors[i] = oldCursors[i];
@@ -983,6 +1551,8 @@ void Hapbeat::pumpStreams(uint64_t now) {
       }
       session.byteOffset += (uint32_t)maximum * STREAM_CHANNELS * 2;
       session.framesSent += maximum;
+      if (session.dataBlocksSent < 255) ++session.dataBlocksSent;
+      session.lastDataMs = now;
       for (uint8_t i = 0; i < MAX_STREAM_SOURCES; ++i) {
         if (!(finishedMask & (uint8_t)(1u << i))) continue;
         session.attached[i] = false;
@@ -998,11 +1568,7 @@ void Hapbeat::pumpStreams(uint64_t now) {
         session.empty = true;
         session.emptySinceMs = now;
       } else if (now - session.emptySinceMs >= SESSION_LINGER_MS) {
-        uint8_t endPacket[hapbeat::HEADER_SIZE];
-        const size_t endLength =
-            hapbeat::buildStreamEnd(endPacket, sizeof(endPacket), nextSeq());
-        sendStreamTo(endPacket, endLength, session.endpoint);
-        recordEnd(session.endpoint, now);
+        sendStreamEnd(session, now);
         removeSession(s);
       }
     }
@@ -1102,11 +1668,7 @@ void Hapbeat::clearAllSources(bool sendEnds) {
     for (uint8_t source = 0; source < MAX_STREAM_SOURCES; ++source)
       session.attached[source] = false;
     if (sendEnds && session.beginSent) {
-      uint8_t packet[hapbeat::HEADER_SIZE];
-      const size_t length =
-          hapbeat::buildStreamEnd(packet, sizeof(packet), nextSeq());
-      sendStreamTo(packet, length, session.endpoint);
-      recordEnd(session.endpoint, now);
+      sendStreamEnd(session, now);
       removeSession(i);
     } else if (sendEnds) {
       removeSession(i);

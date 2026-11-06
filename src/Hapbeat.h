@@ -3,7 +3,10 @@
 // Works on ESP32-series, ESP8266, and Arduino-compatible Wi-Fi boards (anything
 // providing WiFiUDP). Connect Wi-Fi in your sketch first, then call begin().
 // Streaming uses a fixed-capacity, endpoint-scoped mixer. It does not allocate
-// on the heap and never broadcasts stream packets.
+// on the heap and never broadcasts stream packets. Each device gets the stream
+// format its firmware speaks: Stream Gen 2 (session stream, firmware 0.5.0+)
+// under a device-issued lease, or Stream Gen 1 (firmware 0.4.x and older).
+// tick() asks the targeted devices by unicast PING which one they speak.
 // A Hapbeat instance is not thread-safe; synchronize callers that share one
 // instance. Independent Hapbeat instances have independent stream state.
 #ifndef HAPBEAT_H
@@ -22,9 +25,40 @@ enum class HapbeatPlaybackStatus : uint8_t {
   Stopped,
 };
 
+// Why a Playback is Deferred (sdk-multi-stream.md section 3). When matching
+// endpoints differ, the first of Superseded, LeaseUnavailable, UnknownClass and
+// NoResolvedEndpoint is reported.
 enum class HapbeatDeferredReason : uint8_t {
   None,
-  NoResolvedEndpoint,
+  NoResolvedEndpoint,  // no PONG-resolved endpoint matches the target
+  UnknownClass,        // no matched reply to this library's lease PING yet
+  LeaseUnavailable,    // Stream Gen 2 device without a usable lease
+  Superseded,          // another application streamed to the device later
+};
+
+// Stream format of one device endpoint, from matched replies to this
+// library's own extended PING (stream-session.md Receiver classification).
+enum class HapbeatStreamClass : uint8_t {
+  Unknown,  // no matched reply yet: streams to it defer
+  Gen1,     // firmware 0.4.x and older: Stream Gen 1 + 300 ms END guard
+  Gen2,     // firmware 0.5.0 and newer: Stream Gen 2 session stream
+};
+
+// Stream Gen 2 lease of one endpoint. None for Unknown and Gen1 endpoints.
+enum class HapbeatLeaseState : uint8_t {
+  None,
+  Valid,
+  Unavailable,
+  Superseded,  // cleared by the device handing the lease back, or by
+               // Hapbeat::reacquireStreamOwnership()
+};
+
+struct HapbeatStreamEndpointInfo {
+  char address[hapbeat::MAX_DEVICE_ADDRESS_LEN + 1] = {0};
+  IPAddress ip{(uint32_t)0};
+  uint16_t port = 0;
+  HapbeatStreamClass streamClass = HapbeatStreamClass::Unknown;
+  HapbeatLeaseState leaseState = HapbeatLeaseState::None;
 };
 
 // Handle for one logical synthesized-sine source. It is a move-only value
@@ -133,8 +167,27 @@ class Hapbeat {
   void playSine(float freqHz, float intensity, uint32_t durationMs,
                 const char* target = "");
 
-  // Cooperative stream reconciliation, mixing, packet pacing, and PONG intake.
+  // Cooperative stream reconciliation, mixing, packet pacing, PONG / ERROR
+  // intake, and the unicast lease PINGs to the devices the sources target.
   void tick();
+
+  // Stream class of the first known device with this IP (Unknown if none).
+  HapbeatStreamClass streamClass(IPAddress ip) const;
+
+  // Copy the live PONG-resolved endpoints (at most maxOut) into out and
+  // return how many were written.
+  uint8_t streamEndpoints(HapbeatStreamEndpointInfo* out, uint8_t maxOut) const;
+
+  // Take the stream back from another application that superseded this one:
+  // a fresh client incarnation and an immediate lease PING to every target.
+  void reacquireStreamOwnership();
+
+  // Receive one-line warnings (unreadable PONG tails, superseded leases,
+  // device ERRORs). Each is reported once per device. The library never
+  // prints; pass nullptr to stop.
+  void setWarningHandler(void (*handler)(const char* message)) {
+    _warningHandler = handler;
+  }
 
   // Tell the device this app is leaving (clears the OLED app name).
   void end();
@@ -154,6 +207,31 @@ class Hapbeat {
   static const uint32_t STREAM_SEND_AHEAD_FRAMES = 2560;  // 160 ms
   static const uint32_t SESSION_LINGER_MS = 310;
   static const uint8_t MAX_CHUNKS_PER_TICK = 8;
+  static const uint8_t MAX_PENDING_PINGS = 8;
+  static const uint32_t PENDING_PING_MAX_AGE_MS = 15000;
+  // Lease TTL / 3 for a held lease; the faster retry while the class is
+  // unknown or no lease is usable (stream-session.md Discovery lease).
+  static const uint32_t LEASE_REFRESH_MS = 5000;
+  static const uint32_t LEASE_RETRY_MS = 500;
+  // Lease PINGs continue for one TTL after an endpoint's last session.
+  static const uint32_t LEASE_TTL_MS = 15000;
+  // Stream Gen 2 BEGIN repetition (Sender requirements 2): before each of the
+  // first three DATA blocks, then at most 500 ms apart (450 leaves room for
+  // tick jitter).
+  static const uint8_t BEGIN_REPEAT_COUNT = 3;
+  static const uint32_t BEGIN_REPEAT_MS = 450;
+  // A Gen 2 session that could not send DATA this long restarts under the
+  // next generation (Sender requirements 3; the device times out at 5 s).
+  static const uint32_t OWN_GAP_RESTART_MS = 3000;
+  static const size_t WARNING_BUFFER_SIZE = 160;
+
+  enum class EndpointMode : uint8_t {
+    Unknown,
+    Gen1,
+    Gen2,  // a usable lease
+    LeaseUnavailable,
+    Superseded,
+  };
 
   struct KnownDevice {
     IPAddress ip{(uint32_t)0};
@@ -163,6 +241,37 @@ class Hapbeat {
     uint8_t fails = 0;
     bool used = false;
     char address[hapbeat::MAX_DEVICE_ADDRESS_LEN + 1] = {0};
+
+    // Stream class and lease, changed only by matched lease replies and the
+    // device's ERRORs about this library's sessions.
+    HapbeatStreamClass streamClass = HapbeatStreamClass::Unknown;
+    bool leasePinged = false;
+    uint64_t lastLeasePingMs = 0;
+    int64_t lastAcceptedTimestampUs = 0;
+    uint64_t leaseIncarnation = 0;  // incarnation of the accepted reply
+    uint64_t bootId = 0;
+    uint32_t ticket = 0;
+    bool leaseValid = false;
+    bool superseded = false;
+    uint32_t lastGeneration = 0;  // last generation under (bootId, ticket)
+    bool hadSession = false;
+    uint64_t lastSessionMs = 0;
+    // Envelope of the Gen 2 session last ended here (for its ERRORs).
+    uint64_t endedBootId = 0;
+    uint32_t endedTicket = 0;
+    uint32_t endedGeneration = 0;
+    bool ignoredWarned = false;
+    uint16_t errorWarned = 0;  // bit per ERROR code already reported
+  };
+
+  struct PendingPing {
+    bool used = false;
+    uint16_t seq = 0;
+    int64_t timestampUs = 0;
+    IPAddress ip{(uint32_t)0};
+    uint16_t port = 0;
+    uint64_t incarnation = 0;
+    uint64_t sentMs = 0;
   };
 
   struct StreamEndpoint {
@@ -198,6 +307,17 @@ class Hapbeat {
     uint64_t startedMs = 0;
     uint64_t emptySinceMs = 0;
     bool empty = false;
+    // Stream Gen 2 identity. generation 0 = suspended: the session was ended
+    // because its lease became unavailable and keeps the cursors for the
+    // next lease of the same boot (Sender requirements 8).
+    bool gen2 = false;
+    uint64_t bootId = 0;
+    uint32_t ticket = 0;
+    uint32_t generation = 0;
+    uint64_t suspendedMs = 0;
+    uint8_t dataBlocksSent = 0;  // saturates at 255
+    uint64_t lastBeginMs = 0;
+    uint64_t lastDataMs = 0;
   };
 
   struct EndRecord {
@@ -226,6 +346,14 @@ class Hapbeat {
   StreamSession _sessions[MAX_STREAM_SESSIONS];
   EndRecord _endRecords[MAX_END_RECORDS];
 
+  uint64_t _incarnation = 0;  // client incarnation, nonzero after begin()
+  int64_t _lastPingTimestampUs = 0;
+  PendingPing _pendingPings[MAX_PENDING_PINGS];
+  // Class members, not stack: the ESP8266 loop stack is 4 KiB.
+  uint8_t _rxBuffer[hapbeat::MAX_PACKET_SIZE];
+  char _warningBuffer[WARNING_BUFFER_SIZE] = {0};
+  void (*_warningHandler)(const char* message) = nullptr;
+
   uint16_t nextSeq() { return ++_seq; }
   uint16_t nextPlaybackId() {
     ++_nextPlaybackId;
@@ -248,15 +376,37 @@ class Hapbeat {
 
   void pollPongs();
   void pollPongsThrottled();
-  void rememberDevice(IPAddress ip, uint16_t port, const char* address,
-                      bool pinned = false);
+  int8_t rememberDevice(IPAddress ip, uint16_t port, const char* address,
+                        bool pinned = false);
   bool isAlive(const KnownDevice& d) const;
   uint8_t aliveCount() const;
+  int8_t findDevice(IPAddress ip, uint16_t port) const;
+
+  // Stream Gen 2 discovery lease (stream-session.md).
+  void handlePong(IPAddress ip, uint16_t port, size_t length);
+  void handleError(IPAddress ip, uint16_t port, size_t length);
+  const PendingPing* matchPending(uint16_t seq, int64_t timestampUs,
+                                  IPAddress ip, uint16_t port) const;
+  int64_t nextPingTimestamp();
+  void newIncarnation();
+  void serviceLeasePings(uint64_t now);
+  bool leasePingWanted(const KnownDevice& device, uint64_t now) const;
+  void sendLeasePing(KnownDevice& device, uint64_t now);
+  EndpointMode endpointMode(const StreamEndpoint& endpoint) const;
+  bool sessionCurrent(const StreamSession& session,
+                      const StreamEndpoint& endpoint) const;
+  HapbeatLeaseState leaseState(const KnownDevice& device) const;
+  void warn(IPAddress ip, const char* format, ...);
 
   uint64_t extendedMillis() const;
   void reconcileStreams(uint64_t now);
   void pumpStreams(uint64_t now);
-  bool sendStreamBegin(StreamSession& session);
+  bool openSession(uint8_t slot, const StreamEndpoint& endpoint,
+                   EndpointMode mode, uint64_t now);
+  bool allocateGeneration(StreamSession& session, uint64_t now);
+  void restartSession(StreamSession& session, uint64_t now);
+  void sendStreamEnd(StreamSession& session, uint64_t now);
+  bool sendStreamBegin(StreamSession& session, uint64_t now);
   void stopSource(uint8_t slot, uint16_t id, uint64_t generation);
   void setSourceGain(uint8_t slot, uint16_t id, uint64_t generation,
                      float value);
