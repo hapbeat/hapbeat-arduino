@@ -8,6 +8,13 @@
 //   B -> sine 80 Hz, one-shot     (tap = ~500 ms burst)
 //   C -> sine 160 Hz, hold        (vibrates while held; release to stop)
 //
+// The same actions can be driven from the PC over Serial (115200, one
+// character per command, each answered with one line):
+//   a = fire HAPBEAT_EVENT   b = 80 Hz one-shot (~500 ms)   c = toggle 160 Hz hold
+//   s = stop all             p = status (devices, stream class, lease, playbacks)
+// Library warnings are printed as "WARN: <message>", and a status line is
+// printed every 2 s while a sine Playback is not Stopped.
+//
 // Fill in secrets.h (copy from secrets.h.example) before flashing.
 
 #include <M5Unified.h>
@@ -33,6 +40,7 @@ struct UiButton {
 UiButton g_btns[3];
 
 static const int HEADER_H = 64;
+static const uint32_t STATUS_INTERVAL_MS = 2000;
 
 void layoutButtons() {
   const int W = M5.Display.width();
@@ -84,16 +92,92 @@ void drawScreen() {
 
 int g_holdBtn = -1;  // index of the button currently driving a hold stream (C)
 Hapbeat::Playback g_holdPlayback;
+Hapbeat::Playback g_oneshotPlayback;  // B: 80 Hz, ~500 ms
+uint32_t g_lastStatusMs = 0;
 
-// A / B: one-shot (fires once per tap; B blocks ~500 ms while streaming).
+// ---- Serial status --------------------------------------------------------
+
+const char* className(HapbeatStreamClass value) {
+  switch (value) {
+    case HapbeatStreamClass::Gen1: return "Gen1";
+    case HapbeatStreamClass::Gen2: return "Gen2";
+    default: return "Unknown";
+  }
+}
+
+const char* leaseName(HapbeatLeaseState value) {
+  switch (value) {
+    case HapbeatLeaseState::Valid: return "valid";
+    case HapbeatLeaseState::Unavailable: return "unavailable";
+    case HapbeatLeaseState::Superseded: return "superseded";
+    default: return "-";
+  }
+}
+
+const char* statusName(HapbeatPlaybackStatus value) {
+  switch (value) {
+    case HapbeatPlaybackStatus::Active: return "Active";
+    case HapbeatPlaybackStatus::Deferred: return "Deferred";
+    default: return "Stopped";
+  }
+}
+
+const char* reasonName(HapbeatDeferredReason value) {
+  switch (value) {
+    case HapbeatDeferredReason::NoResolvedEndpoint: return "NoResolvedEndpoint";
+    case HapbeatDeferredReason::UnknownClass: return "UnknownClass";
+    case HapbeatDeferredReason::LeaseUnavailable: return "LeaseUnavailable";
+    case HapbeatDeferredReason::Superseded: return "Superseded";
+    default: return "None";
+  }
+}
+
+void printPlayback(const char* name, const Hapbeat::Playback& playback) {
+  Serial.printf(" %s=%s/%s", name, statusName(playback.status()),
+                reasonName(playback.deferredReason()));
+}
+
+// One line: every resolved device (IP, address, stream class, lease) and the
+// state of the two sine Playbacks.
+HapbeatStreamEndpointInfo g_endpoints[8];
+void printStatus() {
+  const uint8_t count = hb.streamEndpoints(g_endpoints, 8);
+  Serial.printf("STATUS t=%lu devices=%u", (unsigned long)millis(), (unsigned)count);
+  for (uint8_t i = 0; i < count; ++i) {
+    Serial.printf(" [%s %s class=%s lease=%s]",
+                  g_endpoints[i].ip.toString().c_str(), g_endpoints[i].address,
+                  className(g_endpoints[i].streamClass),
+                  leaseName(g_endpoints[i].leaseState));
+  }
+  printPlayback("hold", g_holdPlayback);
+  printPlayback("oneshot", g_oneshotPlayback);
+  Serial.println();
+}
+
+void printWarning(const char* message) {
+  Serial.print("WARN: ");
+  Serial.println(message);
+}
+
+// ---- Actions (buttons and Serial) ------------------------------------------
+
+void playEvent() {
+  if (g_wifi_ok) hb.play(HAPBEAT_EVENT, 0.7f);
+}
+
+void playOneshot() {
+  if (g_wifi_ok)
+    g_oneshotPlayback = hb.playSineSource(80.0f, 0.8f, 500, "", 0.0f, false);
+}
+
+// A / B: one-shot (fires once per tap). B registers a 500 ms source that
+// tick() streams from loop().
 void fireOneshot(int i) {
   drawButton(i, true);
-  if (g_wifi_ok) {
-    if (i == 0)
-      hb.play(HAPBEAT_EVENT, 0.7f);
-    else  // i == 1
-      hb.playSine(80.0f, 0.8f, 500);
-  }
+  if (i == 0)
+    playEvent();
+  else  // i == 1
+    playOneshot();
   delay(90);
   drawButton(i, false);
 }
@@ -110,9 +194,55 @@ void startHold(int i) {
 void stopHold() {
   if (g_holdBtn < 0) return;
   if (g_wifi_ok && g_holdPlayback.valid()) g_holdPlayback.stop();
-  g_holdPlayback = Hapbeat::Playback();
   drawButton(g_holdBtn, false);
   g_holdBtn = -1;
+}
+
+void handleSerial() {
+  while (Serial.available() > 0) {
+    const int command = Serial.read();
+    if (command == '\r' || command == '\n' || command == ' ') continue;
+    if (!g_wifi_ok && command != 'p') {
+      Serial.printf("ERR %c: no Wi-Fi\n", (char)command);
+      continue;
+    }
+    switch (command) {
+      case 'a':
+        playEvent();
+        Serial.printf("OK a play %s\n", HAPBEAT_EVENT);
+        break;
+      case 'b':
+        playOneshot();
+        Serial.printf("OK b sine 80Hz 500ms id=%u %s/%s\n",
+                      (unsigned)g_oneshotPlayback.id(),
+                      statusName(g_oneshotPlayback.status()),
+                      reasonName(g_oneshotPlayback.deferredReason()));
+        break;
+      case 'c':
+        if (g_holdBtn >= 0) {
+          stopHold();
+          Serial.println("OK c hold off");
+        } else {
+          startHold(2);
+          Serial.printf("OK c hold on id=%u %s/%s\n",
+                        (unsigned)g_holdPlayback.id(),
+                        statusName(g_holdPlayback.status()),
+                        reasonName(g_holdPlayback.deferredReason()));
+        }
+        break;
+      case 's':
+        hb.stopAll();
+        if (g_holdBtn >= 0) stopHold();
+        Serial.println("OK s stopAll");
+        break;
+      case 'p':
+        printStatus();
+        break;
+      default:
+        Serial.printf("ERR unknown command '%c' (a b c s p)\n", (char)command);
+        break;
+    }
+  }
 }
 
 bool inButton(const UiButton& b, int x, int y) {
@@ -121,6 +251,7 @@ bool inButton(const UiButton& b, int x, int y) {
 
 void setup() {
   auto cfg = M5.config();
+  cfg.serial_baudrate = 115200;
   M5.begin(cfg);
   M5.Display.setTextSize(2);
   M5.Display.setCursor(6, 6);
@@ -135,6 +266,7 @@ void setup() {
 
   if (g_wifi_ok) {
     hb.begin(7700, "M5Test");
+    hb.setWarningHandler(printWarning);
     hb.setBroadcastOnly(FORCE_BROADCAST);
     // Find the Hapbeat endpoint required by streaming. Retry a few times: the
     // device may not have answered the first broadcast PING yet.
@@ -144,6 +276,8 @@ void setup() {
     }
   }
   drawScreen();
+  Serial.printf("READY wifi=%s ip=%s (a b c s p)\n", g_wifi_ok ? "ok" : "failed",
+                WiFi.localIP().toString().c_str());
 }
 
 void loop() {
@@ -171,6 +305,16 @@ void loop() {
   if (t.wasReleased() && g_holdBtn == 2) stopHold();
 #endif
 
+  handleSerial();
+
   // Service the hold source and all other endpoint-scoped streams.
   if (g_wifi_ok) hb.tick();
+
+  // The library has no session start/end callback, so while a sine Playback
+  // is not Stopped the state is printed periodically instead.
+  const bool streaming = !g_holdPlayback.isStopped() || !g_oneshotPlayback.isStopped();
+  if (streaming && millis() - g_lastStatusMs >= STATUS_INTERVAL_MS) {
+    g_lastStatusMs = millis();
+    printStatus();
+  }
 }

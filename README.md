@@ -15,11 +15,12 @@ Two ways to make haptics, no stored audio required:
   intensity, pan, and duration are live parameters — expressive without WAV
   files.
 
-> **Device firmware 0.5.0 and later:** this library's sine streaming (`playSine`,
-> and `beginSine` / `pumpSine` / `endSine` in the published v0.2.0) sends the
-> older stream format, which firmware 0.5.0+ no longer accepts, so sine streams
-> are **silent** on those devices. `play()` (command mode, firing a kit event)
-> still works. On firmware 0.4.x and earlier, sine streams work too.
+> **Stream formats:** devices on firmware 0.5.0 and later get **Stream Gen 2**
+> (the session stream under a lease the device issues); devices on firmware
+> 0.4.x and earlier get **Stream Gen 1**. `tick()` asks each targeted device by
+> unicast PING which one it speaks, so a mix of both under one target works.
+> The published v0.2.0 and older send only Stream Gen 1, which is silent on
+> firmware 0.5.0+.
 
 This is the **level-1** library (initial draft). Verify on your own ESP32 before
 relying on it; ESP-NOW transport and richer synthesis are future work.
@@ -30,7 +31,7 @@ relying on it; ESP-NOW transport and richer synthesis are future work.
   → Include Library → Add .ZIP Library* from a repo ZIP.)
 - **PlatformIO**: add to `lib_deps`:
   ```
-  lib_deps = hapbeat/arduino@^0.2.0
+  lib_deps = hapbeat/arduino@^1.0.0
   ```
 
 The library itself has **no dependencies**. The `M5Stack_*` examples use
@@ -80,7 +81,10 @@ via [Hapbeat Studio](https://devtools.hapbeat.com).
 | `stop(eventId, target = "")` / `stopAll(target = "")` | stop |
 | `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a move-only value `Playback` handle; keep the owning `Hapbeat` alive while using it |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
-| `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
+| `tick()` | consume PONGs / ERRORs, send the unicast lease PINGs, reconcile endpoints, mix sources, and pace stream packets |
+| `streamClass(ip)` / `streamEndpoints(out, max)` | stream class (`Gen1` / `Gen2` / `Unknown`) and Gen 2 lease state (`Valid` / `Unavailable` / `Superseded`) per resolved device |
+| `reacquireStreamOwnership()` | take a device back after another application superseded this one (fresh client incarnation) |
+| `setWarningHandler(fn)` | receive one-line warnings (the library never prints); e.g. `Serial.println` |
 | `ping()` / `end()` | keep-alive probe / announce disconnect |
 | `discover(timeoutMs = 1500)` | broadcast a PING and collect every reply |
 | `poll()` / `deviceCount()` / `deviceIp()` | device table upkeep and inspection |
@@ -127,12 +131,49 @@ a PONG. Commands then fall back to broadcast; stream handles become
 `Deferred(NoResolvedEndpoint)` until a full endpoint is available. Call
 `setBroadcastOnly(true)` only when command packets should be broadcast.
 
+### Stream Gen 2 and Stream Gen 1
+
+A resolved endpoint first gets a 16-byte (extended) PING by unicast, and only
+the device's direct reply to it decides the format: a reply with the `HBS2`
+tail means Stream Gen 2 under the lease it reports, a reply without a tail
+means Stream Gen 1. Until then the handle is `Deferred(UnknownClass)`. While
+it may stream there, `tick()` refreshes the lease every 5 s (and for 15 s
+after the last session). The deferred reasons are, strongest first:
+
+| `deferredReason()` | Meaning |
+|---|---|
+| `Superseded` | another application streamed to the device later; call `reacquireStreamOwnership()` to take it back, or wait for the device to hand it back |
+| `LeaseUnavailable` | a Stream Gen 2 device has no usable lease yet (or is not a stream receiver) |
+| `UnknownClass` | no reply to the lease PING yet |
+| `NoResolvedEndpoint` | no device matches the target |
+
+Stream Gen 2 sessions start a new generation right after the previous END,
+repeat their BEGIN, and restart under the next generation if `tick()` was not
+called for 3 s. Stream Gen 1 devices keep the 310 ms END-to-BEGIN guard (the
+source stays `Active` while it waits).
+
+Not implemented in this version (stream-session.md / sdk-multi-stream.md):
+
+- The device ERRORs `STREAM_TIMED_OUT`, `STREAM_STOPPED` and
+  `STREAM_TARGET_MISMATCH` are only reported through the warning handler; the
+  library does not start a new generation, drop the sources from that device,
+  or re-resolve the endpoint for them.
+- CAPS is not read. A device on a newer firmware major gets no warning, and
+  devices with one motor (`haptic_channels` = 1) still get the panned mix.
+- No endpoint-changed callback: poll `streamEndpoints()`.
+- The mixer saturates once; the gain/pan smoothing, limiter and re-splice of
+  sdk-multi-stream.md 5.7, 5.8 and 6.14 are not implemented.
+- On boards other than ESP32 / ESP8266 the client incarnation comes from
+  Arduino `random()` seeded with `micros()`, which is weak: if a restarted
+  board repeats it, the device may reject its streams until
+  `reacquireStreamOwnership()` is called.
+
 Each `playSineSource` handle has independent status, gain, pan, loop, and
 idempotent `stop()` control. Handles do not retain their owning `Hapbeat`; the
 owner must outlive each handle, and no handle method may be called after owner
 destruction. The hub mixes all matching sources per exact
-endpoint as 16 kHz stereo PCM16, keeps a per-endpoint cursor, and uses a short
-empty-session linger/cooldown around `STREAM_END`.
+endpoint as 16 kHz stereo PCM16, keeps a per-endpoint cursor, and lingers
+310 ms on an empty session before `STREAM_END`.
 
 `Hapbeat` is not thread-safe. Synchronize callers that share one instance;
 independent instances have independent stream state and do not require shared
@@ -140,8 +181,9 @@ locking.
 
 ## How it works at the byte level
 
-See [docs/wire-format.md](docs/wire-format.md) — the exact PLAY packet bytes, so
-you can replicate it from any language/MCU without this library.
+See [docs/wire-format.md](docs/wire-format.md) — the exact PLAY packet bytes and
+the stream packets, so you can replicate them from any language/MCU without
+this library.
 
 ## License
 

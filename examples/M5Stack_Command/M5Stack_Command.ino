@@ -94,6 +94,13 @@ void drawScreen() {
   shownDevices = devices;
 }
 
+// The library never prints. It reports problems (a device it cannot stream
+// to, an error the device sent back) through this handler.
+void printWarning(const char* message) {
+  Serial.print("Hapbeat warning: ");
+  Serial.println(message);
+}
+
 void setup() {
   M5.begin();
   M5.Display.setTextSize(2);
@@ -103,6 +110,7 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) delay(200);
 
   hb.begin(7700, "M5Stack");  // app name shows on the Hapbeat OLED
+  hb.setWarningHandler(printWarning);  // M5.begin() opened Serial at 115200
 
   M5.Display.println("finding\nHapbeat...");
   // Register every device that answers, so commands unicast to all of them.

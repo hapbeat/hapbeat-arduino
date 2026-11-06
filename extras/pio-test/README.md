@@ -39,5 +39,24 @@ Other environments: `atoms3`, `stamps3`, `core`, `core2`, `fire`, `atom`, `stick
 The Hapbeat must be on the same 2.4 GHz Wi-Fi/LAN as the board.
 
 Streaming uses the discovered full PONG endpoint and sends stereo PCM16 stream
-packets by exact unicast only. If no endpoint is resolved, the sine Playback is
-`Deferred(NoResolvedEndpoint)`; command broadcast forcing does not change this.
+packets by exact unicast only, as Stream Gen 2 to firmware 0.5.0+ and Stream
+Gen 1 to firmware 0.4.x and older. If no endpoint is resolved, the sine
+Playback is `Deferred(NoResolvedEndpoint)`; until the device answers the lease
+PING it is `Deferred(UnknownClass)`. Command broadcast forcing does not change
+this.
+
+## 4. Drive it from the PC (Serial, 115200)
+
+One character per command; each prints one line.
+
+| Key | Action |
+|---|---|
+| `a` | fire `HAPBEAT_EVENT` |
+| `b` | 80 Hz one-shot (~500 ms) |
+| `c` | toggle the 160 Hz hold |
+| `s` | stop all |
+| `p` | `STATUS` line: each device's IP, address, stream class and lease, and both Playbacks' status / deferred reason |
+
+Library warnings print as `WARN: <message>`. While a sine Playback is not
+Stopped, a `STATUS` line is printed every 2 s (the library has no session
+start/end callback).

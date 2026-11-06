@@ -116,6 +116,13 @@ void startPhase() {
   phaseStartMs = millis();
 }
 
+// The library never prints. It reports problems (a device it cannot stream
+// to, an error the device sent back) through this handler.
+void printWarning(const char* message) {
+  Serial.print("Hapbeat warning: ");
+  Serial.println(message);
+}
+
 void setup() {
 #ifdef HB_HAS_SCREEN
   M5.begin();
@@ -132,6 +139,7 @@ void setup() {
   Serial.printf("wifi ok, ip=%s\n", WiFi.localIP().toString().c_str());
 
   hb.begin(7700, "VerifyUni");
+  hb.setWarningHandler(printWarning);
 
   // Free heap is worth watching: UDP sends fail with ENOMEM when it runs low,
   // and a display library costs tens of KB.

@@ -31,8 +31,9 @@ streaming. Stored-WAV/clip streaming, an EventMap, and ESP-NOW transport are
   loop, and duration are live parameters. **No kit, no WAV, no Studio** — the
   fastest first success.
 
-Sine streams use the older stream format: on device firmware 0.5.0 and later
-they are silent; `play()` (command mode) still works.
+Sine streams go out as Stream Gen 2 to devices on firmware 0.5.0 and later and
+as Stream Gen 1 to firmware 0.4.x and earlier; the library finds out which per
+device (below).
 
 Event id format is `<kit-name>.<file-name>` (e.g. `sample-kit.sine_100hz`); the
 id must exist in the kit deployed to the device.
@@ -41,7 +42,7 @@ id must exist in the kit deployed to the device.
 
 - **Arduino IDE**: Library Manager → search "Hapbeat", or *Sketch → Include
   Library → Add .ZIP Library* from a repo ZIP.
-- **PlatformIO**: `lib_deps = hapbeat/arduino@^0.2.0`
+- **PlatformIO**: `lib_deps = hapbeat/arduino@^1.0.0`
 
 ## Quick start
 
@@ -82,7 +83,10 @@ void loop() {
 | `setDeviceTimeout(ms)` / `setBroadcastOnly(on)` | liveness window (default 15 s) / force command broadcast; streams still need a full PONG endpoint |
 | `playSineSource(freqHz, intensity, durationMs = 0, target = "", pan = 0, loop = false)` | register a non-blocking source and return a move-only value `Playback` handle; keep the owning `Hapbeat` alive while using it |
 | `playSine(freqHz, intensity, durationMs, target = "")` | blocking convenience wrapper through the same stream hub |
-| `tick()` | consume PONGs, reconcile endpoints, mix sources, and pace stream packets |
+| `tick()` | consume PONGs / ERRORs, send the unicast lease PINGs, reconcile endpoints, mix sources, and pace stream packets |
+| `streamClass(ip)` / `streamEndpoints(out, max)` | per resolved device: `HapbeatStreamClass` (`Gen1` / `Gen2` / `Unknown`) and `HapbeatLeaseState` (`Valid` / `Unavailable` / `Superseded`, `None` unless Gen2); `out` is a caller array of `HapbeatStreamEndpointInfo` |
+| `reacquireStreamOwnership()` | fresh client incarnation + lease PING: take a device back after `Superseded` |
+| `setWarningHandler(void (*)(const char*))` | one-line warnings (unreadable PONG tail, superseded lease, device ERROR), once per device; the library never prints |
 | `end()` | tell the device this app is leaving (clears the OLED app name) |
 
 `playSineSource` rejects non-finite frequency, intensity, and pan values with
@@ -114,7 +118,25 @@ segment, a short target front-matches. So `"player_1/pos_neck"` and
   the owner must outlive each handle and no handle method may be called after
   owner destruction;
   `setBroadcastOnly(true)` never changes stream routing. Empty sessions linger
-  310 ms before `STREAM_END`, followed by a 310 ms cooldown before a new BEGIN.
+  310 ms before `STREAM_END`.
+- Stream format per device (contracts `stream-session.md`): `tick()` sends a
+  16-byte extended PING by unicast to each device a source targets (never
+  broadcast; `ping()` / `discover()` stay 8 bytes). Only the direct reply
+  decides: an `HBS2` tail → **Stream Gen 2** (header version 2, a 16-byte
+  `device_boot_id / lease_ticket / generation` envelope, the device-issued
+  lease, BEGIN repeated, next generation right after END, restart after a 3 s
+  `tick()` gap); no tail → **Stream Gen 1** (version 1, no envelope, 310 ms
+  END-to-BEGIN guard for that device only, during which the source stays
+  `Active`). Leases are refreshed every 5 s and for 15 s after the last session.
+- `deferredReason()`, strongest first: `Superseded` (another application
+  streamed later; `reacquireStreamOwnership()` or the device handing it back
+  clears it), `LeaseUnavailable` (Gen 2 device without a usable lease),
+  `UnknownClass` (no reply to the lease PING yet), `NoResolvedEndpoint`.
+- Not implemented: no action on the device ERRORs `STREAM_TIMED_OUT`,
+  `STREAM_STOPPED`, `STREAM_TARGET_MISMATCH` (warning only); CAPS is not read
+  (no newer-major warning, pan still applied on one-motor devices); no
+  endpoint-changed callback; no gain/pan smoothing, limiter or re-splice;
+  boards other than ESP32 / ESP8266 use a weak `random()` client incarnation.
 
 `Hapbeat` is not thread-safe. Synchronize callers that share one instance;
 independent instances have independent stream state and do not require shared
@@ -126,7 +148,8 @@ locking.
   SDKs (Python `protocol.py`, Unity `HapbeatProtocol.cs`). See
   `src/HapbeatProtocol.h` (framework-agnostic, allocation-free packet builders)
   and `docs/wire-format.md`.
-- Magic `0x4842` ("HB"), version 1, 8-byte header, little-endian. UDP, no ACK
+- Magic `0x4842` ("HB"), 8-byte header, little-endian. Header version 1 for
+  every command except Stream Gen 2 BEGIN / DATA / END (version 2). UDP, no ACK
   (haptics policy: "better dropped than late").
 
 ## Gotchas

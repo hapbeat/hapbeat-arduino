@@ -4,10 +4,37 @@
 
 ## Unreleased
 
+対応する contracts: 1.0.0（tag `v1.0.0`）。
+
+- **Stream Gen 2**（セッション方式、contracts `stream-session.md`、DEC-096）に対応しました。
+  ファーム 0.5.0 以降の機体には Stream Gen 2 で、0.4.x 以前の機体には Stream Gen 1
+  で送ります。`tick()` が、source の target に一致する機体へ 16 byte の拡張 PING を
+  unicast で送り（broadcast しない。`ping()` / `discover()` は 8 byte のまま）、その
+  直接応答の PONG の tail で機体ごとに形式を決めます。照合しない PONG は形式を変えません。
+  - Stream Gen 2: header version 2 と 16 byte の envelope（boot・ticket・generation）、
+    機体が発行する lease（5 s ごとに更新、最後の session の後 15 s まで）、END 直後の
+    次の世代（300 ms 待たない）、BEGIN の再送（最初の 3 つの DATA の前と 500 ms 以下ごと）、
+    `tick()` が 3 s 呼ばれなかったときの次の世代での再開、同じ boot の ticket 変更で
+    cursor を引き継ぐ再開。
+  - Stream Gen 1 の機体だけ、END→BEGIN の 310 ms guard を残しました（待つ間 source は
+    `Active`）。
+  - ERROR（0xFF）を受けます。既知の機体の port 7700 からのものだけ、stream のコードは
+    自分の session の envelope と一致するものだけを扱います。`STREAM_NOT_STARTED`
+    で BEGIN を再送、`STREAM_SUPERSEDED` で保留、`STREAM_LEASE_INVALID` で lease を
+    取り直し、`STREAM_GEN_UNSUPPORTED` で分類し直します。
+- 追加: `HapbeatDeferredReason` の `UnknownClass` / `LeaseUnavailable` / `Superseded`、
+  `HapbeatStreamClass`、`HapbeatLeaseState`、`streamClass(ip)`、
+  `streamEndpoints(out, max)`、`reacquireStreamOwnership()`、
+  `setWarningHandler(fn)`（ライブラリは Serial に出力しません）。
+- 含まないもの: `STREAM_TIMED_OUT` / `STREAM_STOPPED` / `STREAM_TARGET_MISMATCH` の
+  ERROR への動作（警告だけ）、CAPS の読み取り（新しい major の機体への警告、モーター 1 個の
+  機体で pan を掛けない混合）、endpoint の変化の callback、gain・pan の平滑化・limiter・
+  差し替え（`sdk-multi-stream.md` §5.7・§5.8・§6.14）。ESP32 / ESP8266 以外のボードの
+  client incarnation は `random()` による弱い乱数です。
 - `playSineSource(...)` と `tick()` を追加し、固定容量の source / endpoint session
   hub で複数サイン波を同時に扱えるようにしました。各 PONG の完全アドレスへ
   16 kHz stereo PCM16 を exact unicast し、未解決時は `Deferred`、空 session は
-  310 ms linger、`STREAM_END` 後は 310 ms cooldown になります。旧 single sine API
+  310 ms linger、Stream Gen 1 の機体では `STREAM_END` 後に 310 ms cooldown になります。旧 single sine API
   (`beginSine` / `pumpSine` / `endSine` / `sineActive`) は削除しました。
 - `play()` の `gain` を、PLAY に `clamp(gain, 0, 1)` で載せるようにしました（NaN・無限は 0）。本体は gain を切らないので、前は 1 を超えると歪み、負だと波形が反転していました。このライブラリは Kit の manifest を読まないので、Kit の `clip_gain` は掛けません（1 とみなす。contracts `kit-format.md`「強さの式（正本）」、DEC-103）。
 - `play()` に `pan` 引数（左右バランス。-1 = 左のみ / 0 = 中央 / +1 = 右のみ、既定 0）を追加し、PLAY パケット末尾に float32 として常に送るようにしました（contracts DEC-055）。
